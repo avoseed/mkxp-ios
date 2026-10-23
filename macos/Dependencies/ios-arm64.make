@@ -74,36 +74,22 @@ EXTRA_RUBY_CONFIG_ARGS := \
 	--with-baseruby=$(shell which ruby) \
 	--disable-jit-support
 
-# iOS SDK fixups for headers/symbols that exist on macOS but not iOS:
-#  - dir.c includes <sys/vnode.h> under a bare __APPLE__ guard; iOS lacks it and
-#    only needs the vtype/vtagtype enums.
-#  - random.c needs a getentropy prototype (symbol exists, <sys/random.h> doesn't).
-#  - empty bundled_gems: their .bundle C extensions can't cross-link against a
-#    static libruby and the embedded game runtime doesn't use them.
-RUBY_PATCH := \
-	perl -0pi -e 's|\# include <sys/vnode\.h>|#include <TargetConditionals.h>\n# if TARGET_OS_IPHONE\nenum vtype { VNON, VREG, VDIR, VBLK, VCHR, VLNK, VSOCK, VFIFO, VBAD, VSTR, VCPLX };\nenum vtagtype { VT_NON, VT_UFS, VT_NFS, VT_MFS, VT_MSDOSFS, VT_LFS, VT_LOFS, VT_FDESC, VT_PORTAL, VT_NULL, VT_UMAP, VT_KERNFS, VT_PROCFS, VT_AFS, VT_ISOFS, VT_UNION, VT_HFS, VT_ZFS, VT_DEVFS, VT_WEBDAV, VT_UDF, VT_AFP, VT_CDDA, VT_CIFS, VT_OTHER };\n# else\n#  include <sys/vnode.h>\n# endif|' $(DOWNLOADS)/ruby/dir.c && \
-	perl -0pi -e 's|\# if defined\(HAVE_SYS_RANDOM_H\)\n\#  include <sys/random\.h>\n\# endif|# if defined(HAVE_SYS_RANDOM_H)\n#  include <sys/random.h>\n# elif defined(__APPLE__)\nextern int getentropy(void *, size_t); /* iOS SDK ships no <sys/random.h> */\n# endif|' $(DOWNLOADS)/ruby/random.c && \
-	sed -i '' '/^[^#]/d' $(DOWNLOADS)/ruby/gems/bundled_gems
+# Source fixups live in ios-patches/*.sh (recursive '=' so $(DOWNLOADS), set in
+# common.make, expands at use time): make treats every unescaped '#' in a
+# variable as a comment, which silently truncated the inline perl one-liners.
+#  - ruby: iOS lacks <sys/vnode.h>/<sys/random.h>; drop bundled gems (their C
+#    extensions can't cross-link and the game doesn't use them).
+#  - glib: gspawn.c's libproc.h use (no public header on iOS, no exec anyway).
+#  - fluidsynth: FindGLib2.cmake hardcodes AppKit/Carbon for all Apple targets.
+RUBY_PATCH = sh ${PWD}/ios-patches/ruby.sh $(DOWNLOADS)/ruby
 
 # NOTE (expected iteration): with cross_compiling=yes, Ruby's configure will ask
 # for AC_TRY_RUN results it can't run on the host. Feed the failing ones back as
-# `ac_cv_*=...` cache vars here until configure completes. This is the known
-# "며칠 소요 가능" risk from CLAUDE.md — drive it from the actual error log.
+# `ac_cv_*=...` cache vars here until configure completes.
 
-# glib's gspawn.c includes <libproc.h>/<sys/proc_info.h> and calls proc_pidinfo()
-# under a bare __APPLE__ guard to enumerate fds before exec. The iOS SDK ships no
-# public libproc.h, and iOS can't exec child processes anyway (fluidsynth only uses
-# glib's data structures/threads). Gate both on !TARGET_OS_IPHONE so iOS falls through
-# to glib's generic fd-walk loop that immediately follows the proc_pidinfo block.
-GLIB_PATCH := \
-	perl -0pi -e 's|#ifdef __APPLE__\n#include <libproc\.h>\n#include <sys/proc_info\.h>|#ifdef __APPLE__\n#include <TargetConditionals.h>\n#if !TARGET_OS_IPHONE\n#include <libproc.h>\n#include <sys/proc_info.h>\n#endif|' $(DOWNLOADS)/glib/glib/gspawn.c && \
-	perl -0pi -e 's|#if defined\(__APPLE__\)\n  /\* proc_pidinfo|#if defined(__APPLE__) && !TARGET_OS_IPHONE\n  /* proc_pidinfo|' $(DOWNLOADS)/glib/glib/gspawn.c
+GLIB_PATCH = sh ${PWD}/ios-patches/glib.sh $(DOWNLOADS)/glib
 
-# fluidsynth's FindGLib2.cmake unconditionally appends AppKit + Carbon frameworks on
-# all Apple targets, but iOS has neither — the dylib link fails with "framework 'AppKit'
-# not found". Gate those two behind a non-iOS check (Foundation/CoreFoundation stay).
-FLUIDSYNTH_PATCH := \
-	perl -0pi -e 's|    list\(APPEND _glib2_link_libraries "-Wl,-framework,Foundation"\n         "-Wl,-framework,CoreFoundation" "-Wl,-framework,AppKit"\n         "-Wl,-framework,Carbon"\)|    list(APPEND _glib2_link_libraries "-Wl,-framework,Foundation"\n         "-Wl,-framework,CoreFoundation")\n    if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n      list(APPEND _glib2_link_libraries "-Wl,-framework,AppKit"\n           "-Wl,-framework,Carbon")\n    endif()|' $(DOWNLOADS)/fluidsynth/cmake_admin/FindGLib2.cmake
+FLUIDSYNTH_PATCH = sh ${PWD}/ios-patches/fluidsynth.sh $(DOWNLOADS)/fluidsynth
 
 include common.make
 
