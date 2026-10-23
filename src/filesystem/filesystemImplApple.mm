@@ -122,7 +122,12 @@ std::string filesystemImpl::normalizePath(const char *path, bool preferred, bool
  * after didFinishLaunching returns, so the strict launch watchdog is already
  * satisfied, but a very large first-launch copy still blocks the UI. If a device
  * kills the app on first launch, move this onto a background thread with a
- * loading indicator. */
+ * loading indicator.
+ *
+ * Builds without bundled game data (e.g. the CI IPA) instead expect the player
+ * to copy the game folder into Files > Another Red > game. Only a bundle copy
+ * (the one carrying the version marker) is ever replaced, never a game folder
+ * the player put there themselves. */
 std::string filesystemImpl::getDefaultGameRoot() {
     @autoreleasepool {
         NSFileManager *fm = NSFileManager.defaultManager;
@@ -134,9 +139,14 @@ std::string filesystemImpl::getDefaultGameRoot() {
 
         NSString *existing = [NSString stringWithContentsOfFile:marker encoding:NSUTF8StringEncoding error:nil];
         BOOL haveDest = [fm fileExistsAtPath:destGame];
-        BOOL needCopy = !haveDest || ![existing isEqualToString:bundleVer];
+        BOOL bundleManaged = existing != nil;
+        BOOL haveBundleGame = [fm fileExistsAtPath:[srcGame stringByAppendingPathComponent:@"Game.ini"]];
+        BOOL needCopy = haveBundleGame && (!haveDest || (bundleManaged && ![existing isEqualToString:bundleVer]));
 
-        if (needCopy && [fm fileExistsAtPath:srcGame]) {
+        if (!haveDest && !haveBundleGame)
+            [fm createDirectoryAtPath:destGame withIntermediateDirectories:YES attributes:nil error:nil];
+
+        if (needCopy) {
             if (haveDest)
                 [fm removeItemAtPath:destGame error:nil];
             NSError *err = nil;
@@ -144,6 +154,16 @@ std::string filesystemImpl::getDefaultGameRoot() {
                 NSLog(@"mkxp-z: failed to copy game assets to Documents: %@", err);
             else
                 [bundleVer writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+
+        /* Unzipping the PC release in Files leaves the game one folder deeper
+         * ("game/Pokemon Another Red_PWT_.../Game.ini"); accept that too. */
+        if (![fm fileExistsAtPath:[destGame stringByAppendingPathComponent:@"Game.ini"]]) {
+            for (NSString *item in [fm contentsOfDirectoryAtPath:destGame error:nil]) {
+                NSString *sub = [destGame stringByAppendingPathComponent:item];
+                if ([fm fileExistsAtPath:[sub stringByAppendingPathComponent:@"Game.ini"]])
+                    return std::string(NSTOPATH(sub));
+            }
         }
         return std::string(NSTOPATH(destGame));
     }

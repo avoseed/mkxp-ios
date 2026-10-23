@@ -188,6 +188,17 @@
 @end
 
 static MKXPTouchControls *g_touchControls = nil;
+/* Set before the overlay exists when a pad is already connected at launch. */
+static BOOL g_touchControlsHidden = NO;
+
+/* Called from the event thread when a game controller connects/disconnects:
+ * the overlay only gets in the way while playing on a Bluetooth pad. */
+extern "C" void mkxp_ios_setTouchControlsHidden(int hidden) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        g_touchControlsHidden = hidden ? YES : NO;
+        g_touchControls.overlay.hidden = g_touchControlsHidden;
+    });
+}
 
 extern "C" void mkxp_ios_initTouchControls(SDL_Window *win) {
     /* SDL runs SDL_main (the engine's main) on a secondary thread on iOS, so this
@@ -209,6 +220,7 @@ extern "C" void mkxp_ios_initTouchControls(SDL_Window *win) {
                 g_touchControls = [[MKXPTouchControls alloc] init];
 
             [g_touchControls attachTo:root];
+            g_touchControls.overlay.hidden = g_touchControlsHidden;
         }
     });
 }

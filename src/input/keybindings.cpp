@@ -26,6 +26,10 @@
 
 #include <stdio.h>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 struct KbBindingData
 {
 	SDL_Scancode source;
@@ -102,6 +106,28 @@ static elementsN(defaultKbBindings);
 static elementsN(defaultKbBindings1);
 static elementsN(defaultKbBindings2);
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+/* iOS has no settings menu to rebind the pad, and a Bluetooth controller is the
+ * main alternative to the touch overlay, so give every button an Essentials game
+ * uses a face/shoulder button instead of a stick click:
+ * C=Use, B=Back, A=Menu, Z=Special, X/Y=Jump up/down, L=battle speed-up. */
+static const CtrlBindingData defaultCtrlBindings[] =
+{
+	{ SDL_CONTROLLER_BUTTON_A, Input::C },
+	{ SDL_CONTROLLER_BUTTON_B, Input::B },
+	{ SDL_CONTROLLER_BUTTON_X, Input::A },
+	{ SDL_CONTROLLER_BUTTON_Y, Input::Z },
+	{ SDL_CONTROLLER_BUTTON_LEFTSHOULDER, Input::X },
+	{ SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, Input::Y },
+	{ SDL_CONTROLLER_BUTTON_START, Input::A },
+	{ SDL_CONTROLLER_BUTTON_BACK, Input::Z },
+
+    { SDL_CONTROLLER_BUTTON_DPAD_UP, Input::Up },
+    { SDL_CONTROLLER_BUTTON_DPAD_DOWN, Input::Down },
+    { SDL_CONTROLLER_BUTTON_DPAD_LEFT, Input::Left },
+    { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, Input::Right }
+};
+#else
 static const CtrlBindingData defaultCtrlBindings[] =
 {
 	{ SDL_CONTROLLER_BUTTON_X, Input::A  },
@@ -118,6 +144,7 @@ static const CtrlBindingData defaultCtrlBindings[] =
     { SDL_CONTROLLER_BUTTON_DPAD_LEFT, Input::Left },
     { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, Input::Right }
 };
+#endif
 
 static elementsN(defaultCtrlBindings);
 
@@ -156,6 +183,11 @@ BDescVec genDefaultBindings(const Config &conf)
 	addAxisBinding(d, SDL_CONTROLLER_AXIS_LEFTX, Positive, Input::Right);
 	addAxisBinding(d, SDL_CONTROLLER_AXIS_LEFTY, Negative, Input::Up   );
 	addAxisBinding(d, SDL_CONTROLLER_AXIS_LEFTY, Positive, Input::Down );
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	addAxisBinding(d, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, Positive, Input::L);
+	addAxisBinding(d, SDL_CONTROLLER_AXIS_TRIGGERLEFT, Positive, Input::R);
+#endif
 
 	return d;
 }

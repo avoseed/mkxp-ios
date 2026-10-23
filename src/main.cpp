@@ -273,7 +273,22 @@ int main(int argc, char *argv[]) {
     }
     mkxp_fs::setCurrentDirectory(dataDir);
 #endif
-    
+
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+    /* The IPA may ship without game data; tell the player where it goes instead
+     * of failing later on a missing Game.ini. */
+    if (!mkxp_fs::fileExists("Game.ini")) {
+      showInitError("게임 파일이 없습니다.\n\n"
+                    "'파일' 앱 > 나의 iPhone > Another Red > game 폴더에 "
+                    "PC판 게임 폴더의 내용(Game.ini, Data, Graphics, Audio, Fonts 등)을 "
+                    "복사한 뒤 다시 실행하세요.\n\n"
+                    "Game files not found. Copy the PC game folder's contents into "
+                    "Files > On My iPhone > Another Red > game, then relaunch.");
+      SDL_Quit();
+      return 0;
+    }
+#endif
+
     /* now we load the config */
     Config conf;
     conf.read(argc, argv);

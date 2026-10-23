@@ -45,6 +45,9 @@
 #include <TargetConditionals.h>
 #if !TARGET_OS_IPHONE
 #include "TouchBar.h"
+#else
+/* TouchControls.mm: hide the on-screen pad while a game controller is in use. */
+extern "C" void mkxp_ios_setTouchControlsHidden(int hidden);
 #endif
 #endif
 
@@ -196,7 +199,10 @@ void EventThread::process(RGSSThreadData &rtData)
     if (SDL_NumJoysticks() > 0 && SDL_IsGameController(0)) {
             ctrl = SDL_GameControllerOpen(0);
     }
-    
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+    mkxp_ios_setTouchControlsHidden(ctrl != 0);
+#endif
+
     char buffer[128];
     
     char pendingTitle[128];
@@ -446,11 +452,20 @@ void EventThread::process(RGSSThreadData &rtData)
                     break;
                 
                 ctrl = SDL_GameControllerOpen(0);
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+                mkxp_ios_setTouchControlsHidden(ctrl != 0);
+#endif
                 break;
-                
+
             case SDL_CONTROLLERDEVICEREMOVED:
                 resetInputStates();
                 ctrl = 0;
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+                /* Fall back to another connected pad, else bring the overlay back. */
+                if (SDL_NumJoysticks() > 0 && SDL_IsGameController(0))
+                    ctrl = SDL_GameControllerOpen(0);
+                mkxp_ios_setTouchControlsHidden(ctrl != 0);
+#endif
                 break;
                 
             case SDL_MOUSEBUTTONDOWN :

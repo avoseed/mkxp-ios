@@ -236,3 +236,46 @@ make everything -f ios-arm64.make          # deps-core + ruby (1·2단계)
 3. **3단계 MiniFFI(Win32API) 스텁** — Essentials의 소수 Win32API 호출 방어.
 4. **4단계 터치 입력 오버레이** — 가상 D패드/버튼 → SDL 이벤트.
 5. **5단계 사이드로드 배포**.
+
+---
+
+## 6. 블루투스 컨트롤러 · CI 빌드 · 게임 데이터 분리
+
+### 블루투스 컨트롤러 (Xbox / DualSense / Switch Pro / MFi)
+- SDL2를 `CMAKE_SYSTEM_NAME=iOS`로 빌드하면 MFi(GameController.framework) 조이스틱
+  백엔드가 켜지고, Z-iOS는 GameController를 weak 링크한다 → SDL GameController 이벤트로 들어옴.
+- 게임(Essentials)은 키보드 키가 아니라 가상 버튼(`Input::USE/BACK/ACTION/SPECIAL/JUMPUP/
+  JUMPDOWN/AUX1`)만 읽는다(배속도 `Input::AUX1`=L). 그래서 키보드 흉내 대신
+  **iOS 전용 기본 패드 바인딩**(`keybindings.cpp`)만 바꿨다. PC 기본값은 스페셜·L/R이
+  스틱 클릭에 붙어 있어 "패드에선 안 되는 버튼"이 생겼던 것.
+
+| 패드(Xbox 표기) | 게임 버튼 | PC 키보드 |
+|---|---|---|
+| A | 결정(USE) | C |
+| B | 취소(BACK) | X |
+| X / Menu(Start) | 메뉴·가방(ACTION) | Z |
+| Y / View(Select) | 스페셜(SPECIAL) | D |
+| LB / RB | L / R (JUMPUP / JUMPDOWN) | A / S |
+| RT | 배틀 배속(AUX1) | Q |
+| D패드 / 왼쪽 스틱 | 이동 | 방향키 |
+
+- 패드가 연결되면 터치 오버레이를 숨기고, 끊기면 다시 보인다
+  (`mkxp_ios_setTouchControlsHidden`, eventthread의 DEVICEADDED/REMOVED). 끊길 때 다른 패드가
+  남아 있으면 그 패드로 넘어간다.
+- iOS에는 키 설정 메뉴가 없으므로, PC에서 F1로 만든 `keybindings.mkxp1`을 세이브 폴더에
+  같이 복사하면 그 설정이 우선한다.
+
+### CI (맥 없이 IPA 빌드)
+- `.github/workflows/ios.yml`: macOS 러너에서 `make everything` + `make fluidsynth`
+  (`ios-arm64.make`) → `xcodebuild -scheme Z-iOS CODE_SIGNING_ALLOWED=NO` → 서명 없는 IPA 아티팩트.
+  SideStore/AltStore가 설치할 때 다시 서명한다.
+- 의존성(`build-iphoneos-arm64`)은 make 파일 해시로 캐시하고, 앱 빌드가 실패해도 남도록
+  빌드 직후 바로 저장한다.
+- CI에는 게임 데이터가 없으므로 `../game` 자리에 빈 폴더를 만들어 폴더 참조만 맞춘다.
+
+### 게임 데이터는 IPA 밖에서
+- 팬게임 데이터(800MB)는 저장소·IPA에 넣지 않는다. 사용자가 '파일' 앱에서
+  `Another Red/game`에 PC판 게임 폴더를 넣는다(압축 해제로 한 겹 더 들어간 폴더도 인식).
+- `getDefaultGameRoot`는 번들에 `game/Game.ini`가 있을 때만 복사하고, 버전 마커가 있는
+  (번들에서 복사한) 폴더만 교체한다 → 사용자가 직접 넣은 게임 폴더는 앱 업데이트로 지워지지 않는다.
+- `Game.ini`가 없으면 시작 시 넣을 위치를 안내하는 메시지를 띄우고 종료한다.
