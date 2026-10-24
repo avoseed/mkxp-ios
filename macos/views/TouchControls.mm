@@ -350,17 +350,23 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
     CGFloat avail = MIN(leftW, rightW);
     CGFloat m = 10;   // margin from the screen edges
     /* Horizontal centres of the left and right control columns. */
-    CGFloat lcx = safe.left + MAX(leftW / 2, 70), rcx = W - safe.right - MAX(rightW / 2, 76);
+    CGFloat lcx = safe.left + (leftW >= 100 ? leftW / 2 : 70);
+    CGFloat rcx = W - safe.right - (rightW >= 100 ? rightW / 2 : 76);
     CGFloat bottomY = H - MAX(safe.bottom, m) - 6;
 
     /* D-pad: bottom-left. */
     CGFloat pad = MIN(MAX(avail * 0.86, 116), MIN(H * 0.4, 164));
+    /* Never cover the game picture when the bars have room for a usable pad. */
+    if (leftW >= 100)
+        pad = MIN(pad, leftW - 8);
     CGFloat pcy = bottomY - pad / 2;
     _dpad.frame = CGRectMake(lcx - pad / 2, pcy - pad / 2, pad, pad);
 
     /* A/B/X/Y diamond, Super Famicom layout (A right, B bottom, X top, Y left),
      * level with the D-pad. */
     CGFloat d = MIN(MAX(pad * 0.34, 44), 58);
+    if (rightW >= 100)
+        d = MIN(d, (rightW - 8) / 2.96);   // diamond is 2 * off + d wide
     CGFloat off = d * 0.98;
     _a.frame = CGRectMake(rcx + off - d / 2, pcy - d / 2, d, d);
     _b.frame = CGRectMake(rcx - d / 2, pcy + off - d / 2, d, d);
