@@ -111,6 +111,32 @@ std::string filesystemImpl::normalizePath(const char *path, bool preferred, bool
     }
 }
 
+/* Root of the player's files (game/ and the save folder); see LIVECONTAINER.md.
+ * Normally the app's Documents folder. Inside LiveContainer every app's data
+ * container sits at LiveContainer/Data/Application/<UUID>, which is hard to find
+ * in the Files app, so use LiveContainer/Games/<PortDataFolder> instead. */
+static NSString *portDocumentsPath() {
+    static NSString *path;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        path = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSString *home = NSHomeDirectory();
+        NSRegularExpression *re = [NSRegularExpression
+            regularExpressionWithPattern:@"^(.*/(Documents|LiveContainer))/Data/Application/[0-9A-Fa-f-]{36}/?$"
+                                 options:0 error:nil];
+        NSTextCheckingResult *m = [re firstMatchInString:home options:0 range:NSMakeRange(0, home.length)];
+        if (m) {
+            NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+            NSString *name = info[@"PortDataFolder"] ?: info[@"CFBundleName"] ?: @"Game";
+            path = [[[home substringWithRange:[m rangeAtIndex:1]] stringByAppendingPathComponent:@"Games"]
+                    stringByAppendingPathComponent:name];
+            [NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES
+                                                     attributes:nil error:nil];
+        }
+    });
+    return path;
+}
+
 #if TARGET_OS_IPHONE
 /* On iOS the app bundle is read-only and code-signed. The game ships as a blue
  * folder reference at <App>.app/game; on first launch (or after an app update)
@@ -131,8 +157,7 @@ std::string filesystemImpl::normalizePath(const char *path, bool preferred, bool
 std::string filesystemImpl::getDefaultGameRoot() {
     @autoreleasepool {
         NSFileManager *fm = NSFileManager.defaultManager;
-        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        NSString *destGame = [docs stringByAppendingPathComponent:@"game"];
+        NSString *destGame = [portDocumentsPath() stringByAppendingPathComponent:@"game"];
         NSString *srcGame = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"game"];
         NSString *marker = [destGame stringByAppendingPathComponent:@".mkxp_bundle_version"];
         NSString *bundleVer = NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"] ?: @"0";
@@ -225,8 +250,7 @@ std::string filesystemImpl::getDocumentsSavePath(const char *appName) {
     @autoreleasepool {
         NSFileManager *fm = NSFileManager.defaultManager;
         NSString *app = [NSString stringWithUTF8String:appName];
-        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        NSString *dest = [docs stringByAppendingPathComponent:app];
+        NSString *dest = [portDocumentsPath() stringByAppendingPathComponent:app];
 
         BOOL existed = [fm fileExistsAtPath:dest];
         if (!existed)

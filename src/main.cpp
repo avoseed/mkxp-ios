@@ -280,10 +280,12 @@ int main(int argc, char *argv[]) {
     if (!mkxp_fs::fileExists("Game.ini")) {
       showInitError("게임 파일이 없습니다.\n\n"
                     "'파일' 앱 > 나의 iPhone > Another Red > game 폴더에 "
-                    "PC판 게임 폴더의 내용(Game.ini, Data, Graphics, Audio, Fonts 등)을 "
+                    "(LiveContainer에서는 LiveContainer > Games > AnotherRed > game 폴더에) "
+                    "PC판 게임 폴더(Game.ini, Data, Graphics, Audio, Fonts 등이 든 폴더)를 "
                     "복사한 뒤 다시 실행하세요.\n\n"
-                    "Game files not found. Copy the PC game folder's contents into "
-                    "Files > On My iPhone > Another Red > game, then relaunch.");
+                    "Game files not found. Copy the PC game folder into "
+                    "Files > On My iPhone > Another Red > game "
+                    "(in LiveContainer: LiveContainer > Games > AnotherRed > game), then relaunch.");
       SDL_Quit();
       return 0;
     }

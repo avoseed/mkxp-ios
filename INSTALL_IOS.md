@@ -2,6 +2,8 @@
 
 포켓몬스터 어나더레드(PC판)를 아이폰/아이패드에서 실행하는 방법입니다.
 앱(엔진)과 게임 파일은 따로 설치합니다.
+LiveContainer 안에 설치하는 경우 게임 폴더 위치가 다르니 [LIVECONTAINER.md](LIVECONTAINER.md)를 보세요
+(LiveContainer › Games › AnotherRed › game).
 
 ## 1. 앱 설치 (SideStore)
 1. GitHub Actions의 **iOS IPA** 빌드 결과에서 `AnotherRed-unsigned.ipa`를 받습니다.
