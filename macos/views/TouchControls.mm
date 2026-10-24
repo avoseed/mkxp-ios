@@ -53,6 +53,8 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
 - (instancetype)initWithScancode:(int)sc glyph:(NSString *)glyph symbol:(NSString *)symbol
                          caption:(NSString *)caption color:(UIColor *)color ink:(UIColor *)ink;
 @property (nonatomic) BOOL capsule;
+@property (nonatomic) BOOL editing;   // layout editor: ignore presses
+- (void)releaseAll;
 @end
 
 @implementation MKXPPadButton {
@@ -158,8 +160,13 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
     }];
 }
 
-- (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { [self setDown:YES]; }
+- (void)releaseAll { [self setDown:NO]; }
+
+- (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e {
+    if (!self.editing) [self setDown:YES];
+}
 - (void)touchesMoved:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e {
+    if (self.editing) return;
     /* Slide off to release, like a real button; generous slop for thumbs. */
     CGPoint p = [t.anyObject locationInView:self];
     [self setDown:CGRectContainsPoint(CGRectInset(self.bounds, -16, -16), p)];
@@ -173,6 +180,8 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
 /* A black plus-shaped D-pad. Tracks one finger and picks the dominant axis from
  * its position, so you can slide between directions without lifting. */
 @interface MKXPDPad : UIView
+@property (nonatomic) BOOL editing;   // layout editor: ignore presses
+- (void)releaseAll;
 @end
 
 @implementation MKXPDPad {
@@ -279,18 +288,36 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
     [self hold:sc];
 }
 
-- (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { [self track:t.anyObject]; }
-- (void)touchesMoved:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { [self track:t.anyObject]; }
+- (void)releaseAll { [self hold:0]; }
+
+- (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { if (!self.editing) [self track:t.anyObject]; }
+- (void)touchesMoved:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { if (!self.editing) [self track:t.anyObject]; }
 - (void)touchesEnded:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { [self hold:0]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { [self hold:0]; }
 @end
 
 /* ------------------------------------------------------------------------- */
 
+/* Layout editor state, kept in NSUserDefaults: per control, a centre as a
+ * fraction of the screen and a size multiplier; plus the overlay opacity. */
+static NSString *const kLayoutKey = @"mkxpTouchLayout";
+static NSString *const kAlphaKey = @"mkxpTouchAlpha";
+
 @implementation MKXPTouchOverlay {
     MKXPDPad *_dpad;
     MKXPPadButton *_a, *_b, *_x, *_y, *_l, *_r, *_speed;
     UILabel *_speedLabel;
+    NSDictionary<NSString *, UIView *> *_controls;   // id -> control
+    NSMutableDictionary<NSString *, NSDictionary *> *_custom;   // id -> {x, y, s}
+    CGFloat _alpha;
+
+    UIButton *_gear;
+    BOOL _editing;
+    UIView *_selected;
+    CGFloat _pinchStart;
+    UIView *_toolbar;
+    UISlider *_alphaSlider;
+    UILabel *_hint;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -318,6 +345,7 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
     _speed = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_Q glyph:nil symbol:@"forward.fill"
                                              caption:nil color:rgb(84, 84, 94) ink:rgb(210, 210, 218)];
     _l.capsule = _r.capsule = _speed.capsule = YES;
+    _speed.transform = CGAffineTransformMakeRotation(-25.0 * M_PI / 180.0);
     _speedLabel = [[UILabel alloc] init];
     _speedLabel.text = @"배속";
     _speedLabel.textColor = rgb(170, 170, 180);
@@ -326,12 +354,224 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
 
     for (UIView *v in @[_dpad, _a, _b, _x, _y, _l, _r, _speed, _speedLabel])
         [self addSubview:v];
+
+    _controls = @{ @"dpad": _dpad, @"a": _a, @"b": _b, @"x": _x, @"y": _y,
+                   @"l": _l, @"r": _r, @"speed": _speed };
+    NSUserDefaults *defs = NSUserDefaults.standardUserDefaults;
+    _custom = [([defs dictionaryForKey:kLayoutKey] ?: @{}) mutableCopy];
+    _alpha = [defs objectForKey:kAlphaKey] ? [defs doubleForKey:kAlphaKey] : 1.0;
+
+    for (UIView *v in _controls.allValues) {
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragged:)];
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapped:)];
+        pan.enabled = tap.enabled = NO;
+        [v addGestureRecognizer:pan];
+        [v addGestureRecognizer:tap];
+    }
+    UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(pinched:)];
+    pinch.enabled = NO;
+    [self addGestureRecognizer:pinch];
+
+    _gear = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_gear setImage:[UIImage systemImageNamed:@"gearshape.fill"] forState:UIControlStateNormal];
+    _gear.tintColor = rgb(150, 150, 160);
+    [_gear addTarget:self action:@selector(startEditing) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:_gear];
+
+    [self buildToolbar];
+    [self applyAlpha];
     return self;
+}
+
+- (UIButton *)toolButton:(NSString *)title action:(SEL)action {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    [b setTitle:title forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    b.tintColor = UIColor.whiteColor;
+    b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.15];
+    b.layer.cornerRadius = 8;
+    b.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
+    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
+- (void)buildToolbar {
+    _toolbar = [[UIView alloc] init];
+    _toolbar.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.9];
+    _toolbar.layer.cornerRadius = 14;
+    _toolbar.hidden = YES;
+
+    UILabel *alphaLabel = [[UILabel alloc] init];
+    alphaLabel.text = @"투명도";
+    alphaLabel.textColor = UIColor.whiteColor;
+    alphaLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    _alphaSlider = [[UISlider alloc] init];
+    _alphaSlider.minimumValue = 0.2;
+    _alphaSlider.maximumValue = 1.0;
+    [_alphaSlider addTarget:self action:@selector(alphaChanged:) forControlEvents:UIControlEventValueChanged];
+    [_alphaSlider.widthAnchor constraintEqualToConstant:110].active = YES;
+
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[
+        [self toolButton:@"크기 −" action:@selector(shrink)],
+        [self toolButton:@"크기 +" action:@selector(grow)],
+        alphaLabel, _alphaSlider,
+        [self toolButton:@"초기화" action:@selector(resetLayout)],
+        [self toolButton:@"완료" action:@selector(stopEditing)],
+    ]];
+    row.spacing = 8;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _hint = [[UILabel alloc] init];
+    _hint.text = @"버튼을 끌어서 옮기고, 고른 버튼을 두 손가락으로 벌리거나 오므려 크기를 바꾸세요.";
+    _hint.textColor = [UIColor colorWithWhite:1 alpha:0.75];
+    _hint.font = [UIFont systemFontOfSize:12];
+    _hint.textAlignment = NSTextAlignmentCenter;
+    _hint.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [_toolbar addSubview:row];
+    [_toolbar addSubview:_hint];
+    [NSLayoutConstraint activateConstraints:@[
+        [row.topAnchor constraintEqualToAnchor:_toolbar.topAnchor constant:10],
+        [row.centerXAnchor constraintEqualToAnchor:_toolbar.centerXAnchor],
+        [_hint.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:6],
+        [_hint.leadingAnchor constraintEqualToAnchor:_toolbar.leadingAnchor constant:10],
+        [_hint.trailingAnchor constraintEqualToAnchor:_toolbar.trailingAnchor constant:-10],
+    ]];
+    [self addSubview:_toolbar];
 }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    return (hit == self) ? nil : hit;
+    /* While editing, keep the touch so pinches anywhere resize the selected control. */
+    if (hit == self)
+        return _editing ? self : nil;
+    return hit;
+}
+
+/* ---- Layout editor ---- */
+
+- (void)setEditing:(BOOL)editing {
+    _editing = editing;
+    for (UIView *v in _controls.allValues) {
+        [(id)v setEditing:editing];
+        if (editing) [(id)v releaseAll];
+        for (UIGestureRecognizer *g in v.gestureRecognizers)
+            g.enabled = editing;
+    }
+    for (UIGestureRecognizer *g in self.gestureRecognizers)
+        g.enabled = editing;
+    _toolbar.hidden = !editing;
+    _gear.hidden = editing;
+    _alphaSlider.value = _alpha;
+    [self select:editing ? _dpad : nil];
+    [self applyAlpha];
+}
+
+- (void)startEditing { [self setEditing:YES]; }
+
+- (void)stopEditing {
+    [self setEditing:NO];
+    [self save];
+}
+
+- (void)select:(UIView *)v {
+    _selected.layer.borderWidth = 0;
+    _selected = v;
+    v.layer.borderWidth = 2;
+    v.layer.borderColor = rgb(255, 214, 10).CGColor;
+    v.layer.cornerRadius = 8;
+}
+
+- (NSString *)idOf:(UIView *)v {
+    return [_controls allKeysForObject:v].firstObject;
+}
+
+/* Current centre/scale of a control, in the stored (fractional) form. */
+- (NSMutableDictionary *)entryFor:(UIView *)v {
+    NSString *key = [self idOf:v];
+    NSMutableDictionary *e = [(_custom[key] ?: @{}) mutableCopy];
+    CGSize sz = self.bounds.size;
+    e[@"x"] = @(v.center.x / sz.width);
+    e[@"y"] = @(v.center.y / sz.height);
+    if (!e[@"s"]) e[@"s"] = @1.0;
+    return e;
+}
+
+- (void)setScale:(CGFloat)s of:(UIView *)v {
+    if (!v) return;
+    NSMutableDictionary *e = [self entryFor:v];
+    e[@"s"] = @(MIN(MAX(s, 0.6), 2.2));
+    _custom[[self idOf:v]] = e;
+    [self setNeedsLayout];
+}
+
+- (CGFloat)scaleOf:(UIView *)v {
+    NSNumber *s = _custom[[self idOf:v]][@"s"];
+    return s ? s.doubleValue : 1.0;
+}
+
+- (void)dragged:(UIPanGestureRecognizer *)g {
+    UIView *v = g.view;
+    [self select:v];
+    CGPoint t = [g translationInView:self];
+    v.center = CGPointMake(v.center.x + t.x, v.center.y + t.y);
+    [g setTranslation:CGPointZero inView:self];
+    _custom[[self idOf:v]] = [self entryFor:v];
+    if (v == _speed) [self placeSpeedLabel];
+    if (g.state == UIGestureRecognizerStateEnded) [self setNeedsLayout];
+}
+
+- (void)tapped:(UITapGestureRecognizer *)g { [self select:g.view]; }
+
+- (void)pinched:(UIPinchGestureRecognizer *)g {
+    if (!_selected) return;
+    if (g.state == UIGestureRecognizerStateBegan) _pinchStart = [self scaleOf:_selected];
+    [self setScale:_pinchStart * g.scale of:_selected];
+}
+
+- (void)shrink { [self setScale:[self scaleOf:_selected] - 0.1 of:_selected]; }
+- (void)grow { [self setScale:[self scaleOf:_selected] + 0.1 of:_selected]; }
+
+- (void)alphaChanged:(UISlider *)s {
+    _alpha = s.value;
+    [self applyAlpha];
+}
+
+- (void)applyAlpha {
+    for (UIView *v in _controls.allValues)
+        v.alpha = _alpha;
+    _speedLabel.alpha = _alpha;
+}
+
+- (void)resetLayout {
+    [_custom removeAllObjects];
+    _alpha = 1.0;
+    _alphaSlider.value = _alpha;
+    [self applyAlpha];
+    [self setNeedsLayout];
+}
+
+- (void)save {
+    NSUserDefaults *defs = NSUserDefaults.standardUserDefaults;
+    [defs setObject:_custom forKey:kLayoutKey];
+    [defs setDouble:_alpha forKey:kAlphaKey];
+}
+
+/* Default size/centre, then the player's override from the editor. */
+- (void)place:(UIView *)v size:(CGSize)size center:(CGPoint)c {
+    NSDictionary *e = _custom[[self idOf:v]];
+    CGFloat s = e[@"s"] ? [e[@"s"] doubleValue] : 1.0;
+    if (e[@"x"] && e[@"y"])
+        c = CGPointMake([e[@"x"] doubleValue] * self.bounds.size.width,
+                        [e[@"y"] doubleValue] * self.bounds.size.height);
+    v.bounds = CGRectMake(0, 0, size.width * s, size.height * s);
+    v.center = c;
+}
+
+- (void)placeSpeedLabel {
+    _speedLabel.bounds = CGRectMake(0, 0, 80, 14);
+    _speedLabel.center = CGPointMake(_speed.center.x, _speed.center.y + _speed.bounds.size.height / 2 + 14);
 }
 
 /* Sized from the screen: inside the bars beside the 4:3 game picture when they
@@ -360,7 +600,7 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
     if (leftW >= 100)
         pad = MIN(pad, leftW - 8);
     CGFloat pcy = bottomY - pad / 2;
-    _dpad.frame = CGRectMake(lcx - pad / 2, pcy - pad / 2, pad, pad);
+    [self place:_dpad size:CGSizeMake(pad, pad) center:CGPointMake(lcx, pcy)];
 
     /* A/B/X/Y diamond, Super Famicom layout (A right, B bottom, X top, Y left),
      * level with the D-pad. */
@@ -368,21 +608,25 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
     if (rightW >= 100)
         d = MIN(d, (rightW - 8) / 2.96);   // diamond is 2 * off + d wide
     CGFloat off = d * 0.98;
-    _a.frame = CGRectMake(rcx + off - d / 2, pcy - d / 2, d, d);
-    _b.frame = CGRectMake(rcx - d / 2, pcy + off - d / 2, d, d);
-    _x.frame = CGRectMake(rcx - d / 2, pcy - off - d / 2, d, d);
-    _y.frame = CGRectMake(rcx - off - d / 2, pcy - d / 2, d, d);
+    CGSize face = CGSizeMake(d, d);
+    [self place:_a size:face center:CGPointMake(rcx + off, pcy)];
+    [self place:_b size:face center:CGPointMake(rcx, pcy + off)];
+    [self place:_x size:face center:CGPointMake(rcx, pcy - off)];
+    [self place:_y size:face center:CGPointMake(rcx - off, pcy)];
 
     /* Shoulders along the top; the speed-up pill under R, slanted like START. */
     CGFloat sw = MIN(MAX(avail * 0.8, 72), 120), sh = 32;
     CGFloat top = MAX(safe.top, m);
-    _l.frame = CGRectMake(lcx - sw / 2, top, sw, sh);
-    _r.frame = CGRectMake(rcx - sw / 2, top, sw, sh);
-    CGFloat pw = 54, ph = 22;
-    _speed.transform = CGAffineTransformIdentity;
-    _speed.frame = CGRectMake(rcx - pw / 2, top + sh + 18, pw, ph);
-    _speed.transform = CGAffineTransformMakeRotation(-25.0 * M_PI / 180.0);
-    _speedLabel.frame = CGRectMake(rcx - 40, top + sh + 18 + ph + 6, 80, 14);
+    [self place:_l size:CGSizeMake(sw, sh) center:CGPointMake(lcx, top + sh / 2)];
+    [self place:_r size:CGSizeMake(sw, sh) center:CGPointMake(rcx, top + sh / 2)];
+    [self place:_speed size:CGSizeMake(54, 22) center:CGPointMake(rcx, top + sh + 29)];
+    [self placeSpeedLabel];
+
+    /* Layout editor: gear under L, toolbar over the top of the game picture. */
+    _gear.frame = CGRectMake(lcx - 18, top + sh + 10, 36, 36);
+    /* Over the game picture only, so L/R stay reachable for dragging. */
+    CGSize tb = CGSizeMake(MIN(MAX(W - 2 * bar - 8, 500), W - 24), 78);
+    _toolbar.frame = CGRectMake((W - tb.width) / 2, top, tb.width, tb.height);
 }
 @end
 
