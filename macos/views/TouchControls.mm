@@ -1,16 +1,16 @@
 /*
  ** TouchControls.mm
  **
- ** iOS-only. A UIKit overlay (D-pad, A/B/menu/special face buttons, L/R and a
- ** battle speed-up button) drawn on top of SDL's GL view. Each control writes
- ** directly into EventThread::keyStates[] — the same array Input snapshots every
- ** frame — so the existing keyboard bindings are fully reused:
- **   A = C (use), B = X (back), menu = Z (action), special = D,
+ ** iOS-only. A UIKit overlay styled after the Super Famicom pad, drawn on top of
+ ** SDL's GL view: a black D-pad, the red/yellow/blue/green
+ ** A/B/X/Y diamond, grey L/R shoulders and a START-style speed-up button. Each
+ ** control writes directly into EventThread::keyStates[] — the same array Input
+ ** snapshots every frame — so the existing keyboard bindings are fully reused:
+ **   A = C (use), B = X (back), X = Z (menu), Y = D (special),
  **   L = A (jump up), R = S (jump down), speed-up = Q.
  **
- ** Buttons are labelled by what they do in the game (A/B like a Game Boy, icons
- ** for the rest, a small caption under each) rather than by keyboard key, and are
- ** laid out inside the black bars beside the 4:3 game picture when there's room.
+ ** Buttons carry a small caption with what they do in the game (결정, 취소, …),
+ ** and the pad is laid out inside the black bars beside the 4:3 picture.
  */
 
 #include <TargetConditionals.h>
@@ -31,9 +31,12 @@ static void pressKey(int sc, bool down) {
         EventThread::keyStatesLatch[sc] = true;
 }
 
-static UIColor *fillColor(CGFloat alpha) { return [UIColor colorWithWhite:0.08 alpha:alpha]; }
-static UIColor *strokeColor() { return [UIColor colorWithWhite:1.0 alpha:0.32]; }
-static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
+static UIColor *rgb(int r, int g, int b, CGFloat a = 1.0) {
+    return [UIColor colorWithRed:r / 255.0 green:g / 255.0 blue:b / 255.0 alpha:a];
+}
+
+/* Super Famicom palette. */
+static UIColor *padBlack()  { return rgb(38, 38, 42); }
 
 /* ------------------------------------------------------------------------- */
 
@@ -44,18 +47,19 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
 
 /* ------------------------------------------------------------------------- */
 
-/* A round (or capsule) button with a glyph and a small caption underneath. */
+/* A round (or capsule) button: coloured, slightly domed, with a letter or symbol
+ * and an optional caption under it. */
 @interface MKXPPadButton : UIView
 - (instancetype)initWithScancode:(int)sc glyph:(NSString *)glyph symbol:(NSString *)symbol
-                         caption:(NSString *)caption tint:(UIColor *)tint;
+                         caption:(NSString *)caption color:(UIColor *)color ink:(UIColor *)ink;
 @property (nonatomic) BOOL capsule;
 @end
 
 @implementation MKXPPadButton {
     int _scancode;
     BOOL _down;
-    UIColor *_tint;
     UIView *_face;
+    CAGradientLayer *_dome;
     UILabel *_glyph;
     UIImageView *_symbol;
     UILabel *_caption;
@@ -63,28 +67,41 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
 }
 
 - (instancetype)initWithScancode:(int)sc glyph:(NSString *)glyph symbol:(NSString *)symbol
-                         caption:(NSString *)caption tint:(UIColor *)tint {
+                         caption:(NSString *)caption color:(UIColor *)color ink:(UIColor *)ink {
     self = [super initWithFrame:CGRectZero];
     if (!self) return nil;
     _scancode = sc;
-    _tint = tint;
     self.multipleTouchEnabled = YES;
 
     _face = [[UIView alloc] init];
     _face.userInteractionEnabled = NO;
-    _face.layer.borderWidth = 1.5;
-    _face.layer.borderColor = strokeColor().CGColor;
+    _face.backgroundColor = color;
+    _face.layer.borderWidth = 1;
+    _face.layer.borderColor = [UIColor colorWithWhite:0 alpha:0.35].CGColor;
+    _face.layer.shadowColor = UIColor.blackColor.CGColor;
+    _face.layer.shadowOpacity = 0.5;
+    _face.layer.shadowRadius = 1.5;
+    _face.layer.shadowOffset = CGSizeMake(0, 2);
     [self addSubview:_face];
+
+    /* Light from above: a highlight fading into a darker lower edge. */
+    _dome = [CAGradientLayer layer];
+    _dome.colors = @[(id)[UIColor colorWithWhite:1 alpha:0.38].CGColor,
+                     (id)[UIColor colorWithWhite:1 alpha:0.0].CGColor,
+                     (id)[UIColor colorWithWhite:0 alpha:0.18].CGColor];
+    _dome.locations = @[@0.0, @0.5, @1.0];
+    _dome.masksToBounds = YES;
+    [_face.layer addSublayer:_dome];
 
     if (symbol) {
         _symbol = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:symbol]];
-        _symbol.tintColor = glyphColor();
+        _symbol.tintColor = ink;
         _symbol.contentMode = UIViewContentModeScaleAspectFit;
         [_face addSubview:_symbol];
     } else {
         _glyph = [[UILabel alloc] init];
         _glyph.text = glyph;
-        _glyph.textColor = glyphColor();
+        _glyph.textColor = ink;
         _glyph.textAlignment = NSTextAlignmentCenter;
         [_face addSubview:_glyph];
     }
@@ -92,13 +109,12 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
     if (caption) {
         _caption = [[UILabel alloc] init];
         _caption.text = caption;
-        _caption.textColor = [UIColor colorWithWhite:1.0 alpha:0.75];
+        _caption.textColor = [ink colorWithAlphaComponent:0.85];
         _caption.textAlignment = NSTextAlignmentCenter;
         [_face addSubview:_caption];
     }
 
     _haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [self refresh];
     return self;
 }
 
@@ -107,10 +123,12 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
     [super layoutSubviews];
     CGRect b = self.bounds;
     CGFloat w = b.size.width, h = b.size.height, s = MIN(w, h);
-    /* bounds + center rather than frame: the face carries a scale transform. */
+    /* bounds + center rather than frame: the face carries a press transform. */
     _face.bounds = b;
     _face.center = CGPointMake(CGRectGetMidX(b), CGRectGetMidY(b));
     _face.layer.cornerRadius = self.capsule ? h / 2 : s / 2;
+    _dome.frame = _face.bounds;
+    _dome.cornerRadius = _face.layer.cornerRadius;
     CGFloat glyphY = _caption ? h * 0.40 : h * 0.5;
     if (_glyph) {
         _glyph.font = [UIFont systemFontOfSize:s * (_caption ? 0.40 : self.capsule ? 0.5 : 0.46)
@@ -127,18 +145,17 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
     }
 }
 
-- (void)refresh {
-    UIColor *base = _tint ?: fillColor(0.42);
-    _face.backgroundColor = _down ? [UIColor colorWithWhite:1.0 alpha:0.38] : base;
-    _face.transform = _down ? CGAffineTransformMakeScale(0.9, 0.9) : CGAffineTransformIdentity;
-}
-
 - (void)setDown:(BOOL)down {
     if (down == _down) return;
     _down = down;
     pressKey(_scancode, down);
     if (down) [_haptic impactOccurred];
-    [UIView animateWithDuration:0.06 animations:^{ [self refresh]; }];
+    [UIView animateWithDuration:0.05 animations:^{
+        /* Pressed in: sinks a little, loses its shadow and highlight. */
+        self->_face.transform = down ? CGAffineTransformMakeTranslation(0, 1.5) : CGAffineTransformIdentity;
+        self->_face.layer.shadowOpacity = down ? 0.1 : 0.5;
+        self->_face.alpha = down ? 0.82 : 1.0;
+    }];
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)t withEvent:(UIEvent *)e { [self setDown:YES]; }
@@ -153,8 +170,8 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
 
 /* ------------------------------------------------------------------------- */
 
-/* A plus-shaped D-pad. Tracks one finger and picks the dominant axis from its
- * position, so you can slide between directions without lifting. */
+/* A black plus-shaped D-pad. Tracks one finger and picks the dominant axis from
+ * its position, so you can slide between directions without lifting. */
 @interface MKXPDPad : UIView
 @end
 
@@ -162,6 +179,7 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
     int _active;   // currently-held SDL scancode, or 0
     CAShapeLayer *_cross;
     CAShapeLayer *_highlight;
+    CAShapeLayer *_dimple;
     NSArray<UIImageView *> *_arrows;   // up, down, left, right
     UIImpactFeedbackGenerator *_haptic;
 }
@@ -170,20 +188,30 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
     self = [super initWithFrame:frame];
     if (!self) return nil;
     _cross = [CAShapeLayer layer];
-    _cross.fillColor = fillColor(0.42).CGColor;
-    _cross.strokeColor = strokeColor().CGColor;
+    _cross.fillColor = padBlack().CGColor;
+    /* Outlined so the black cross still reads against the black bars. */
+    _cross.strokeColor = rgb(120, 120, 130).CGColor;
     _cross.lineWidth = 1.5;
+    _cross.shadowColor = UIColor.blackColor.CGColor;
+    _cross.shadowOpacity = 0.5;
+    _cross.shadowRadius = 2;
+    _cross.shadowOffset = CGSizeMake(0, 2);
     [self.layer addSublayer:_cross];
 
     _highlight = [CAShapeLayer layer];
-    _highlight.fillColor = [UIColor colorWithWhite:1.0 alpha:0.32].CGColor;
+    _highlight.fillColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
     [self.layer addSublayer:_highlight];
+
+    /* The shallow round dip in the middle of the cross. */
+    _dimple = [CAShapeLayer layer];
+    _dimple.fillColor = rgb(28, 28, 31).CGColor;
+    [self.layer addSublayer:_dimple];
 
     NSMutableArray *arrows = [NSMutableArray array];
     for (NSString *name in @[@"arrowtriangle.up.fill", @"arrowtriangle.down.fill",
                              @"arrowtriangle.left.fill", @"arrowtriangle.right.fill"]) {
         UIImageView *v = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:name]];
-        v.tintColor = [UIColor colorWithWhite:1.0 alpha:0.75];
+        v.tintColor = rgb(92, 92, 100);
         v.contentMode = UIViewContentModeScaleAspectFit;
         [self addSubview:v];
         [arrows addObject:v];
@@ -206,14 +234,14 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGFloat s = MIN(self.bounds.size.width, self.bounds.size.height), w = s / 3, r = w * 0.28;
+    CGFloat s = MIN(self.bounds.size.width, self.bounds.size.height), w = s / 3, r = w * 0.2;
     UIBezierPath *cross = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(w, 0, w, s) cornerRadius:r];
     [cross appendPath:[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, w, s, w) cornerRadius:r]];
     _cross.path = cross.CGPath;
-    _cross.fillRule = kCAFillRuleNonZero;
     _cross.frame = self.bounds;
     _highlight.frame = self.bounds;
-    CGFloat g = w * 0.38;
+    _dimple.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(CGRectMake(w, w, w, w), w * 0.2, w * 0.2)].CGPath;
+    CGFloat g = w * 0.36;
     for (int i = 0; i < 4; i++) {
         CGRect a = [self armRect:i];
         _arrows[i].frame = CGRectMake(CGRectGetMidX(a) - g / 2, CGRectGetMidY(a) - g / 2, g, g);
@@ -226,8 +254,8 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
               _active == SDL_SCANCODE_LEFT ? 2 : _active == SDL_SCANCODE_RIGHT ? 3 : -1;
     CGFloat w = MIN(self.bounds.size.width, self.bounds.size.height) / 3;
     _highlight.path = dir < 0 ? nil
-        : [UIBezierPath bezierPathWithRoundedRect:CGRectInset([self armRect:dir], 2, 2)
-                                     cornerRadius:w * 0.24].CGPath;
+        : [UIBezierPath bezierPathWithRoundedRect:CGRectInset([self armRect:dir], 1, 1)
+                                     cornerRadius:w * 0.2].CGPath;
 }
 
 - (void)hold:(int)sc {
@@ -261,7 +289,8 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
 
 @implementation MKXPTouchOverlay {
     MKXPDPad *_dpad;
-    MKXPPadButton *_a, *_b, *_menu, *_special, *_l, *_r, *_speed;
+    MKXPPadButton *_a, *_b, *_x, *_y, *_l, *_r, *_speed;
+    UILabel *_speedLabel;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -270,23 +299,32 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
     self.backgroundColor = UIColor.clearColor;
     self.multipleTouchEnabled = YES;
 
-    UIColor *red = [UIColor colorWithRed:0.86 green:0.19 blue:0.20 alpha:0.62];
-    UIColor *slate = [UIColor colorWithRed:0.25 green:0.33 blue:0.62 alpha:0.6];
+    UIColor *white = UIColor.whiteColor, *dark = rgb(60, 60, 66), *brown = rgb(92, 64, 10);
 
-    _dpad = [[MKXPDPad alloc] initWithFrame:CGRectZero];
-    _a = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_C glyph:@"A" symbol:nil caption:@"결정" tint:red];
-    _b = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_X glyph:@"B" symbol:nil caption:@"취소" tint:slate];
-    _menu = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_Z glyph:nil
-                                             symbol:@"line.horizontal.3" caption:@"메뉴" tint:nil];
-    _special = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_D glyph:nil
-                                                symbol:@"star.fill" caption:@"등록" tint:nil];
-    _l = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_A glyph:@"L" symbol:nil caption:nil tint:nil];
-    _r = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_S glyph:@"R" symbol:nil caption:nil tint:nil];
-    _speed = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_Q glyph:nil
-                                              symbol:@"forward.fill" caption:@"배속" tint:nil];
-    _l.capsule = _r.capsule = YES;
+    _dpad =[[MKXPDPad alloc] initWithFrame:CGRectZero];
+    _a = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_C glyph:@"A" symbol:nil caption:@"결정"
+                                           color:rgb(206, 36, 44) ink:white];
+    _b = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_X glyph:@"B" symbol:nil caption:@"취소"
+                                           color:rgb(244, 192, 30) ink:brown];
+    _x = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_Z glyph:@"X" symbol:nil caption:@"메뉴"
+                                           color:rgb(44, 76, 166) ink:white];
+    _y = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_D glyph:@"Y" symbol:nil caption:@"등록"
+                                           color:rgb(30, 142, 72) ink:white];
+    _l = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_A glyph:@"L" symbol:nil caption:nil
+                                           color:rgb(178, 178, 188) ink:dark];
+    _r = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_S glyph:@"R" symbol:nil caption:nil
+                                           color:rgb(178, 178, 188) ink:dark];
+    /* Speed-up as a START/SELECT-style slanted pill, labelled under it. */
+    _speed = [[MKXPPadButton alloc] initWithScancode:SDL_SCANCODE_Q glyph:nil symbol:@"forward.fill"
+                                             caption:nil color:rgb(84, 84, 94) ink:rgb(210, 210, 218)];
+    _l.capsule = _r.capsule = _speed.capsule = YES;
+    _speedLabel = [[UILabel alloc] init];
+    _speedLabel.text = @"배속";
+    _speedLabel.textColor = rgb(170, 170, 180);
+    _speedLabel.textAlignment = NSTextAlignmentCenter;
+    _speedLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
 
-    for (UIView *v in @[_dpad, _a, _b, _menu, _special, _l, _r, _speed])
+    for (UIView *v in @[_dpad, _a, _b, _x, _y, _l, _r, _speed, _speedLabel])
         [self addSubview:v];
     return self;
 }
@@ -313,29 +351,32 @@ static UIColor *glyphColor() { return [UIColor colorWithWhite:1.0 alpha:0.92]; }
     CGFloat m = 10;   // margin from the screen edges
     /* Horizontal centres of the left and right control columns. */
     CGFloat lcx = safe.left + MAX(leftW / 2, 70), rcx = W - safe.right - MAX(rightW / 2, 76);
+    CGFloat bottomY = H - MAX(safe.bottom, m) - 6;
 
     /* D-pad: bottom-left. */
-    CGFloat pad = MIN(MAX(avail * 0.92, 120), MIN(H * 0.44, 180));
-    CGFloat bottomY = H - MAX(safe.bottom, m) - 6;
-    _dpad.frame = CGRectMake(lcx - pad / 2, bottomY - pad, pad, pad);
+    CGFloat pad = MIN(MAX(avail * 0.86, 116), MIN(H * 0.4, 164));
+    CGFloat pcy = bottomY - pad / 2;
+    _dpad.frame = CGRectMake(lcx - pad / 2, pcy - pad / 2, pad, pad);
 
-    /* Face buttons: a diamond at the bottom-right, A on the right like a Game Boy
-     * (A right, B bottom, menu top, special left), bottom-aligned with the D-pad. */
-    CGFloat d = MIN(MAX(pad * 0.36, 46), 62);
+    /* A/B/X/Y diamond, Super Famicom layout (A right, B bottom, X top, Y left),
+     * level with the D-pad. */
+    CGFloat d = MIN(MAX(pad * 0.34, 44), 58);
     CGFloat off = d * 0.98;
-    CGFloat cy = bottomY - off - d / 2;
-    _a.frame = CGRectMake(rcx + off - d / 2, cy - d / 2, d, d);
-    _b.frame = CGRectMake(rcx - d / 2, cy + off - d / 2, d, d);
-    _menu.frame = CGRectMake(rcx - d / 2, cy - off - d / 2, d, d);
-    _special.frame = CGRectMake(rcx - off - d / 2, cy - d / 2, d, d);
+    _a.frame = CGRectMake(rcx + off - d / 2, pcy - d / 2, d, d);
+    _b.frame = CGRectMake(rcx - d / 2, pcy + off - d / 2, d, d);
+    _x.frame = CGRectMake(rcx - d / 2, pcy - off - d / 2, d, d);
+    _y.frame = CGRectMake(rcx - off - d / 2, pcy - d / 2, d, d);
 
-    /* Shoulders along the top, speed-up under R. */
-    CGFloat sw = MIN(MAX(avail * 0.8, 72), 120), sh = 34;
+    /* Shoulders along the top; the speed-up pill under R, slanted like START. */
+    CGFloat sw = MIN(MAX(avail * 0.8, 72), 120), sh = 32;
     CGFloat top = MAX(safe.top, m);
     _l.frame = CGRectMake(lcx - sw / 2, top, sw, sh);
     _r.frame = CGRectMake(rcx - sw / 2, top, sw, sh);
-    CGFloat s = d * 0.86;
-    _speed.frame = CGRectMake(rcx - s / 2, top + sh + 10, s, s);
+    CGFloat pw = 54, ph = 22;
+    _speed.transform = CGAffineTransformIdentity;
+    _speed.frame = CGRectMake(rcx - pw / 2, top + sh + 18, pw, ph);
+    _speed.transform = CGAffineTransformMakeRotation(-25.0 * M_PI / 180.0);
+    _speedLabel.frame = CGRectMake(rcx - 40, top + sh + 18 + ph + 6, 80, 14);
 }
 @end
 
