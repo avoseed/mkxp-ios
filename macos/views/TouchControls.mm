@@ -757,7 +757,8 @@ static NSString *const kImportAddressKey = @"wifiImportAddress";
 
     _field = [[UITextField alloc] init];
     _field.placeholder = @"PC 주소 (예: 192.168.0.10:8765)";
-    _field.text = [NSUserDefaults.standardUserDefaults stringForKey:kImportAddressKey];
+    /* The PC running serve-games (E:\ios-ports\PC에서-받기-서버.cmd) until the player changes it. */
+    _field.text = [NSUserDefaults.standardUserDefaults stringForKey:kImportAddressKey] ?: @"192.168.0.2:8765";
     _field.borderStyle = UITextBorderStyleRoundedRect;
     _field.keyboardType = UIKeyboardTypeURL;
     _field.autocapitalizationType = UITextAutocapitalizationTypeNone;
