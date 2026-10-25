@@ -52,6 +52,13 @@ jobs:
           path: macos/Dependencies/build-iphoneos-arm64
           key: ${{ steps.deps-cache.outputs.cache-primary-key }}
 
+      - name: Version
+        run: |
+          # VERSION holds the app version; the build number is the CI run number,
+          # so every IPA is uniquely "AnotherRed-<version>-b<build>".
+          echo "APP_VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
+          echo "APP_BUILD=${{ github.run_number }}" >> "$GITHUB_ENV"
+
       - name: Build app
         run: |
           # Z-iOS bundles the folder reference ../../game (relative to macos/);
@@ -61,6 +68,7 @@ jobs:
             -configuration Release -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             PRODUCT_BUNDLE_IDENTIFIER=io.github.avoseed.anotherred \
+            MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$APP_BUILD" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
             build
@@ -69,13 +77,15 @@ jobs:
         run: |
           app=$(find build/Build/Products -maxdepth 2 -path '*-iphoneos/*.app' | head -n 1)
           test -n "$app"
+          name="AnotherRed-$APP_VERSION-b$APP_BUILD"
           mkdir -p ipa/Payload
           cp -R "$app" ipa/Payload/
-          (cd ipa && zip -qry ../AnotherRed-unsigned.ipa Payload)
-          ls -lh AnotherRed-unsigned.ipa
+          (cd ipa && zip -qry "../$name.ipa" Payload)
+          ls -lh "$name.ipa"
+          echo "IPA_NAME=$name" >> "$GITHUB_ENV"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: AnotherRed-ios-${{ github.sha }}
-          path: AnotherRed-unsigned.ipa
+          name: ${{ env.IPA_NAME }}
+          path: ${{ env.IPA_NAME }}.ipa

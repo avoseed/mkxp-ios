@@ -457,7 +457,10 @@ extern "C" int mkxp_ios_targetFrameRate(void) {
     row.translatesAutoresizingMaskIntoConstraints = NO;
 
     _hint = [[UILabel alloc] init];
-    _hint.text = @"버튼을 끌어서 옮기고, 고른 버튼을 두 손가락으로 벌리거나 오므려 크기를 바꾸세요.";
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    _hint.text = [NSString stringWithFormat:
+        @"버튼을 끌어서 옮기고, 고른 버튼을 두 손가락으로 벌리거나 오므려 크기를 바꾸세요.   v%@ (%@)",
+        info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]];
     _hint.textColor = [UIColor colorWithWhite:1 alpha:0.75];
     _hint.font = [UIFont systemFontOfSize:12];
     _hint.textAlignment = NSTextAlignmentCenter;
