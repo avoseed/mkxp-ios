@@ -478,14 +478,6 @@ int main(int argc, char *argv[]) {
     if (!mode.refresh_rate)
       conf.syncToRefreshrate = false;
 
-#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
-    /* syncToRefreshrate turns the frame limiter off and relies on vsync to pace
-     * frames, but SDL's EAGL swap on iOS doesn't block for vsync: games that set
-     * it (Essentials does, in mkxp.json) then render uncapped and the phone runs
-     * hot. Always pace with the limiter at the game's own frame rate instead. */
-    conf.syncToRefreshrate = false;
-#endif
-
     EventThread eventThread;
 
 #ifndef MKXPZ_INIT_GL_LATER

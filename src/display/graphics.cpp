@@ -57,6 +57,14 @@
 #include "steamshim_child.h"
 #endif
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+/* TouchControls.mm: 60, or 40 in the overlay's power-save mode. */
+extern "C" int mkxp_ios_targetFrameRate(void);
+#endif
+
 #include <algorithm>
 #include <errno.h>
 #include <sys/time.h>
@@ -1166,8 +1174,17 @@ struct GraphicsPrivate {
 Graphics::Graphics(RGSSThreadData *data) {
     p = new GraphicsPrivate(data);
     if (data->config.syncToRefreshrate) {
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+        /* syncToRefreshrate leaves pacing to vsync, but SDL's EAGL swap doesn't
+         * block for it: games that set it (Essentials does) would render
+         * uncapped and overheat the phone, or run at 120 on ProMotion. Pace with
+         * the limiter instead; Graphics::update follows power-save changes. */
+        p->frameRate = mkxp_ios_targetFrameRate();
+        p->fpsLimiter.setDesiredFPS(p->frameRate);
+#else
         p->frameRate = data->refreshRate;
         p->fpsLimiter.disabled = true;
+#endif
     } else if (data->config.fixedFramerate > 0) {
         p->fpsLimiter.setDesiredFPS(data->config.fixedFramerate);
     } else if (data->config.fixedFramerate < 0) {
@@ -1211,7 +1228,17 @@ void Graphics::update(bool checkForShutdown) {
     
     if (p->frozen)
         return;
-    
+
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+    if (p->threadData->config.syncToRefreshrate) {
+        int fps = mkxp_ios_targetFrameRate();
+        if (fps != p->frameRate) {
+            p->frameRate = fps;
+            p->fpsLimiter.setDesiredFPS(fps);
+        }
+    }
+#endif
+
     if (p->fpsLimiter.frameSkipRequired()) {
         if (p->useFrameSkip) {
             /* Skip frame */

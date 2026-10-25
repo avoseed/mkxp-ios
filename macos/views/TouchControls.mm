@@ -24,6 +24,8 @@
 
 #include "eventthread.h"
 
+#include <atomic>
+
 static void pressKey(int sc, bool down) {
     EventThread::keyStates[sc] = down;
     /* A tap can go down and up between two game frames; latch it so Input sees it. */
@@ -302,6 +304,20 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
  * fraction of the screen and a size multiplier; plus the overlay opacity. */
 static NSString *const kLayoutKey = @"mkxpTouchLayout";
 static NSString *const kAlphaKey = @"mkxpTouchAlpha";
+static NSString *const kPowerSaveKey = @"mkxpPowerSave";
+
+/* Frame rate for games that ask to sync to the display (see Graphics::Graphics):
+ * 60, or 40 in power-save mode. Read by the RGSS thread every frame. */
+static std::atomic<int> g_targetFps{0};
+
+extern "C" int mkxp_ios_targetFrameRate(void) {
+    int fps = g_targetFps.load();
+    if (fps == 0) {
+        fps = [NSUserDefaults.standardUserDefaults boolForKey:kPowerSaveKey] ? 40 : 60;
+        g_targetFps.store(fps);
+    }
+    return fps;
+}
 
 @implementation MKXPTouchOverlay {
     MKXPDPad *_dpad;
@@ -317,6 +333,7 @@ static NSString *const kAlphaKey = @"mkxpTouchAlpha";
     CGFloat _pinchStart;
     UIView *_toolbar;
     UISlider *_alphaSlider;
+    UISwitch *_powerSave;
     UILabel *_hint;
 }
 
@@ -411,13 +428,30 @@ static NSString *const kAlphaKey = @"mkxpTouchAlpha";
     [_alphaSlider addTarget:self action:@selector(alphaChanged:) forControlEvents:UIControlEventValueChanged];
     [_alphaSlider.widthAnchor constraintEqualToConstant:110].active = YES;
 
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[
+    UILabel *powerLabel = [[UILabel alloc] init];
+    powerLabel.text = @"절전 모드 (40fps)";
+    powerLabel.textColor = UIColor.whiteColor;
+    powerLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    _powerSave = [[UISwitch alloc] init];
+    _powerSave.on = mkxp_ios_targetFrameRate() == 40;
+    [_powerSave addTarget:self action:@selector(powerSaveChanged:) forControlEvents:UIControlEventValueChanged];
+
+    UIStackView *top = [[UIStackView alloc] initWithArrangedSubviews:@[
         [self toolButton:@"크기 −" action:@selector(shrink)],
         [self toolButton:@"크기 +" action:@selector(grow)],
         alphaLabel, _alphaSlider,
+    ]];
+    UIStackView *bottom = [[UIStackView alloc] initWithArrangedSubviews:@[
+        powerLabel, _powerSave,
         [self toolButton:@"초기화" action:@selector(resetLayout)],
         [self toolButton:@"완료" action:@selector(stopEditing)],
     ]];
+    for (UIStackView *s in @[top, bottom]) {
+        s.spacing = 10;
+        s.alignment = UIStackViewAlignmentCenter;
+    }
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[top, bottom]];
+    row.axis = UILayoutConstraintAxisVertical;
     row.spacing = 8;
     row.alignment = UIStackViewAlignmentCenter;
     row.translatesAutoresizingMaskIntoConstraints = NO;
@@ -533,6 +567,11 @@ static NSString *const kAlphaKey = @"mkxpTouchAlpha";
 - (void)shrink { [self setScale:[self scaleOf:_selected] - 0.1 of:_selected]; }
 - (void)grow { [self setScale:[self scaleOf:_selected] + 0.1 of:_selected]; }
 
+- (void)powerSaveChanged:(UISwitch *)s {
+    [NSUserDefaults.standardUserDefaults setBool:s.on forKey:kPowerSaveKey];
+    g_targetFps.store(s.on ? 40 : 60);
+}
+
 - (void)alphaChanged:(UISlider *)s {
     _alpha = s.value;
     [self applyAlpha];
@@ -625,7 +664,7 @@ static NSString *const kAlphaKey = @"mkxpTouchAlpha";
     /* Layout editor: gear under L, toolbar over the top of the game picture. */
     _gear.frame = CGRectMake(lcx - 18, top + sh + 10, 36, 36);
     /* Over the game picture only, so L/R stay reachable for dragging. */
-    CGSize tb = CGSizeMake(MIN(MAX(W - 2 * bar - 8, 500), W - 24), 78);
+    CGSize tb = CGSizeMake(MIN(MAX(W - 2 * bar - 8, 500), W - 24), 122);
     _toolbar.frame = CGRectMake((W - tb.width) / 2, top, tb.width, tb.height);
 }
 @end
