@@ -87,6 +87,7 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 extern "C" void mkxp_ios_initAudioSession(void);
 extern "C" void mkxp_ios_initTouchControls(SDL_Window *win);
 extern "C" int mkxp_ios_importGame(void);
+extern "C" int mkxp_ios_importIncomplete(void);
 #endif
 
 #ifndef MKXPZ_INIT_GL_LATER
@@ -278,7 +279,7 @@ int main(int argc, char *argv[]) {
 #if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
     /* The IPA ships without game data: offer "PC에서 받기" (Wi-Fi from the PC, found automatically),
      * then look for the game again; explain where it goes if it's still missing. */
-    if (!mkxp_fs::fileExists("Game.ini") && mkxp_ios_importGame())
+    if ((!mkxp_fs::fileExists("Game.ini") || mkxp_ios_importIncomplete()) && mkxp_ios_importGame())
         mkxp_fs::setCurrentDirectory(mkxp_fs::getDefaultGameRoot().c_str());
     if (!mkxp_fs::fileExists("Game.ini")) {
       showInitError("게임 파일이 없습니다.\n\n"

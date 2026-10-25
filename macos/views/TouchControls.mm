@@ -969,6 +969,12 @@ static NSData *fetchData(NSURLSession *s, NSURL *url, NSInteger *status, NSError
     NSArray<NSDictionary *> *files = manifest[@"files"];
     long long total = [manifest[@"total"] longLongValue];
 
+    /* Until every file is here main() must not start the game (see
+     * mkxp_ios_importIncomplete); removed only after a complete download. */
+    [fm createDirectoryAtPath:_dest withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *marker = [_dest stringByAppendingPathComponent:@".pcimport-incomplete"];
+    [fm createFileAtPath:marker contents:nil attributes:nil];
+
     NSMutableArray<NSDictionary *> *todo = [NSMutableArray array];
     long long have = 0;
     for (NSDictionary *f in files) {
@@ -1032,9 +1038,21 @@ static NSData *fetchData(NSURLSession *s, NSURL *url, NSInteger *status, NSError
     }
     [queue waitUntilAllOperationsAreFinished];
     [session finishTasksAndInvalidate];
-    return failure ? [@"받다가 실패했습니다: " stringByAppendingString:failure] : nil;
+    if (failure)
+        return [@"받다가 실패했습니다: " stringByAppendingString:failure];
+    [fm removeItemAtPath:marker error:nil];
+    return nil;
 }
 @end
+
+/* True while a "PC에서 받기" hasn't finished: main() then shows the importer
+ * (which resumes) instead of starting a half-copied game. */
+extern "C" int mkxp_ios_importIncomplete(void) {
+    @autoreleasepool {
+        NSString *marker = [@(mkxp_ios_gameImportDir()) stringByAppendingPathComponent:@".pcimport-incomplete"];
+        return [NSFileManager.defaultManager fileExistsAtPath:marker] ? 1 : 0;
+    }
+}
 
 /* Blocks until the player has fetched the game (returns 1). main() calls this
  * before the SDL window exists; it may run on the UIKit main thread or not. */
