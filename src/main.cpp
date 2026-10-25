@@ -86,6 +86,7 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 /* iOS-only bridges (audiosession-ios.mm, TouchControls.mm) */
 extern "C" void mkxp_ios_initAudioSession(void);
 extern "C" void mkxp_ios_initTouchControls(SDL_Window *win);
+extern "C" int mkxp_ios_importGame(void);
 #endif
 
 #ifndef MKXPZ_INIT_GL_LATER
@@ -275,8 +276,10 @@ int main(int argc, char *argv[]) {
 #endif
 
 #if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
-    /* The IPA may ship without game data; tell the player where it goes instead
-     * of failing later on a missing Game.ini. */
+    /* The IPA ships without game data: offer "PC에서 받기" (Wi-Fi from the PC),
+     * then look for the game again; explain where it goes if it's still missing. */
+    if (!mkxp_fs::fileExists("Game.ini") && mkxp_ios_importGame())
+        mkxp_fs::setCurrentDirectory(mkxp_fs::getDefaultGameRoot().c_str());
     if (!mkxp_fs::fileExists("Game.ini")) {
       showInitError("게임 파일이 없습니다.\n\n"
                     "'파일' 앱 > 나의 iPhone > Another Red > game 폴더에 "

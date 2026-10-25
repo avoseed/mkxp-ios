@@ -711,4 +711,262 @@ extern "C" void mkxp_ios_initTouchControls(SDL_Window *win) {
     });
 }
 
+/* ------------------------------------------------------------------------- */
+/* "PC에서 받기": shown by main() when there is no game yet. Fetches the game
+ * from the PC (E:\ios-ports\tools\serve-games.py) over Wi-Fi straight into the
+ * game folder, file by file, skipping files already there so an interrupted
+ * transfer resumes. Protocol: GET /api/manifest/<App> -> {total, files: [{p, s}]},
+ * GET /api/file/<App>/<p>. */
+
+extern "C" const char *mkxp_ios_gameImportDir(void);   // filesystemImplApple.mm
+
+static NSString *const kImportAddressKey = @"wifiImportAddress";
+
+@interface MKXPImporter : NSObject <UITextFieldDelegate>
+@property (nonatomic, copy) void (^finished)(BOOL ok);
+- (void)show;
+- (void)hide;
+@end
+
+@implementation MKXPImporter {
+    UIWindow *_window;
+    UITextField *_field;
+    UIButton *_button;
+    UIProgressView *_bar;
+    UILabel *_status;
+    NSString *_app;
+    NSString *_dest;
+}
+
+- (void)show {
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    _app = info[@"PortDataFolder"] ?: @"Game";
+    _dest = @(mkxp_ios_gameImportDir());
+
+    UIViewController *vc = [[UIViewController alloc] init];
+    vc.view.backgroundColor = UIColor.blackColor;
+
+    UILabel *label = [[UILabel alloc] init];
+    label.numberOfLines = 0;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.textColor = UIColor.whiteColor;
+    label.font = [UIFont systemFontOfSize:15];
+    label.text = [NSString stringWithFormat:
+        @"게임 파일이 없습니다.\nPC에서 serve-games를 켜고 아래에 PC 주소를 넣어 받거나,\n"
+        @"'파일' 앱의 %@ › game 폴더에 PC판 게임 폴더를 복사한 뒤 다시 실행하세요.", _app];
+
+    _field = [[UITextField alloc] init];
+    _field.placeholder = @"PC 주소 (예: 192.168.0.10:8765)";
+    _field.text = [NSUserDefaults.standardUserDefaults stringForKey:kImportAddressKey];
+    _field.borderStyle = UITextBorderStyleRoundedRect;
+    _field.keyboardType = UIKeyboardTypeURL;
+    _field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    _field.autocorrectionType = UITextAutocorrectionTypeNo;
+    _field.delegate = self;
+    [_field.widthAnchor constraintEqualToConstant:300].active = YES;
+
+    _button = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_button setTitle:@"PC에서 받기" forState:UIControlStateNormal];
+    _button.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    [_button addTarget:self action:@selector(start) forControlEvents:UIControlEventTouchUpInside];
+
+    _bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    _bar.hidden = YES;
+    [_bar.widthAnchor constraintEqualToConstant:300].active = YES;
+
+    _status = [[UILabel alloc] init];
+    _status.numberOfLines = 0;
+    _status.textAlignment = NSTextAlignmentCenter;
+    _status.textColor = [UIColor colorWithWhite:1 alpha:0.7];
+    _status.font = [UIFont systemFontOfSize:13];
+    _status.text = [NSString stringWithFormat:@"v%@ (%@)", info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[label, _field, _button, _bar, _status]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 12;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [vc.view addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.centerXAnchor constraintEqualToAnchor:vc.view.centerXAnchor],
+        [stack.centerYAnchor constraintEqualToAnchor:vc.view.centerYAnchor],
+        [stack.widthAnchor constraintLessThanOrEqualToAnchor:vc.view.widthAnchor constant:-48],
+    ]];
+
+    _window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    _window.rootViewController = vc;
+    [_window makeKeyAndVisible];
+}
+
+- (void)hide {
+    _window.hidden = YES;
+    _window = nil;
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)field {
+    [self start];
+    return YES;
+}
+
+- (void)setStatus:(NSString *)text {
+    dispatch_async(dispatch_get_main_queue(), ^{ self->_status.text = text; });
+}
+
+- (void)start {
+    NSString *text = [_field.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    [NSUserDefaults.standardUserDefaults setObject:text forKey:kImportAddressKey];
+    if (![text containsString:@"://"])
+        text = [@"http://" stringByAppendingString:text];
+    NSURL *base = [NSURL URLWithString:text];
+    if (!base.host) {
+        _status.text = @"PC 주소가 올바르지 않습니다. 예: 192.168.0.10:8765";
+        return;
+    }
+    [_field resignFirstResponder];
+    _button.enabled = NO;
+    _bar.hidden = NO;
+    _status.text = @"PC에 연결하는 중…";
+    UIApplication.sharedApplication.idleTimerDisabled = YES;   // don't sleep mid-transfer
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *error = [self runFrom:base];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIApplication.sharedApplication.idleTimerDisabled = NO;
+            if (error) {
+                self->_status.text = [error stringByAppendingString:@"\n다시 누르면 이어서 받습니다."];
+                self->_button.enabled = YES;
+            } else if (self.finished) {
+                self.finished(YES);
+            }
+        });
+    });
+}
+
+/* Blocking fetch helper for the worker threads. */
+static NSData *fetchData(NSURLSession *s, NSURL *url, NSInteger *status, NSError **err) {
+    __block NSData *out = nil;
+    __block NSError *error = nil;
+    __block NSInteger code = 0;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [[s dataTaskWithURL:url completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        out = d;
+        code = [(NSHTTPURLResponse *)r statusCode];
+        error = e;
+        dispatch_semaphore_signal(done);
+    }] resume];
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    *status = code;
+    if (err) *err = error;
+    return out;
+}
+
+/* Returns nil on success, else a message for the player. */
+- (NSString *)runFrom:(NSURL *)base {
+    NSURLSessionConfiguration *config = NSURLSessionConfiguration.defaultSessionConfiguration;
+    config.timeoutIntervalForRequest = 30;
+    config.HTTPMaximumConnectionsPerHost = 4;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    NSInteger code = 0;
+    NSError *err = nil;
+    NSURL *manifestURL = [[base URLByAppendingPathComponent:@"api/manifest"] URLByAppendingPathComponent:_app];
+    NSData *data = fetchData(session, manifestURL, &code, &err);
+    if (!data || code != 200)
+        return err ? [NSString stringWithFormat:@"PC에 연결하지 못했습니다: %@", err.localizedDescription]
+                   : [NSString stringWithFormat:@"PC가 %ld 오류를 보냈습니다 (목록).", (long)code];
+    NSDictionary *manifest = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSArray<NSDictionary *> *files = manifest[@"files"];
+    long long total = [manifest[@"total"] longLongValue];
+
+    NSMutableArray<NSDictionary *> *todo = [NSMutableArray array];
+    long long have = 0;
+    for (NSDictionary *f in files) {
+        NSString *path = [_dest stringByAppendingPathComponent:f[@"p"]];
+        long long want = [f[@"s"] longLongValue];
+        NSNumber *size = [fm attributesOfItemAtPath:path error:nil][NSFileSize];
+        if (size && size.longLongValue == want) have += want;
+        else [todo addObject:f];
+    }
+
+    __block long long done = have;
+    __block NSString *failure = nil;
+    NSObject *lock = [[NSObject alloc] init];
+    NSOperationQueue *queue = [[NSOperationQueue alloc] init];
+    queue.maxConcurrentOperationCount = 4;
+
+    void (^report)(void) = ^{
+        long long d;
+        @synchronized (lock) { d = done; }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_bar.progress = total > 0 ? (float)((double)d / (double)total) : 0;
+            self->_status.text = [NSString stringWithFormat:@"받는 중 %.2f / %.2f GB", d / 1e9, total / 1e9];
+        });
+    };
+    report();
+
+    for (NSDictionary *f in todo) {
+        [queue addOperationWithBlock:^{
+            @synchronized (lock) { if (failure) return; }
+            NSString *rel = f[@"p"];
+            NSURL *url = [[base URLByAppendingPathComponent:@"api/file"] URLByAppendingPathComponent:self->_app];
+            for (NSString *part in [rel componentsSeparatedByString:@"/"])
+                url = [url URLByAppendingPathComponent:part];
+            NSString *target = [self->_dest stringByAppendingPathComponent:rel];
+
+            __block NSString *problem = nil;
+            dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+            [[session downloadTaskWithURL:url completionHandler:^(NSURL *tmp, NSURLResponse *r, NSError *e) {
+                NSInteger status = [(NSHTTPURLResponse *)r statusCode];
+                if (e || status != 200) {
+                    problem = e ? e.localizedDescription : [NSString stringWithFormat:@"%ld (%@)", (long)status, rel];
+                } else {
+                    /* The temp file is gone once this handler returns: move it now. */
+                    [fm createDirectoryAtPath:target.stringByDeletingLastPathComponent
+                  withIntermediateDirectories:YES attributes:nil error:nil];
+                    [fm removeItemAtPath:target error:nil];
+                    NSError *moveErr = nil;
+                    if (![fm moveItemAtURL:tmp toURL:[NSURL fileURLWithPath:target] error:&moveErr])
+                        problem = moveErr.localizedDescription;
+                }
+                dispatch_semaphore_signal(sem);
+            }] resume];
+            dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+
+            @synchronized (lock) {
+                if (problem) { if (!failure) failure = problem; return; }
+                done += [f[@"s"] longLongValue];
+            }
+            report();
+        }];
+    }
+    [queue waitUntilAllOperationsAreFinished];
+    [session finishTasksAndInvalidate];
+    return failure ? [@"받다가 실패했습니다: " stringByAppendingString:failure] : nil;
+}
+@end
+
+/* Blocks until the player has fetched the game (returns 1). main() calls this
+ * before the SDL window exists; it may run on the UIKit main thread or not. */
+extern "C" int mkxp_ios_importGame(void) {
+    __block BOOL finished = NO;
+    __block MKXPImporter *importer = nil;
+    void (^present)(void) = ^{
+        importer = [[MKXPImporter alloc] init];
+        importer.finished = ^(BOOL ok) { finished = YES; };
+        [importer show];
+    };
+    if (NSThread.isMainThread) {
+        present();
+        while (!finished)
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+        [importer hide];
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), present);
+        while (!finished)
+            usleep(50 * 1000);
+        dispatch_sync(dispatch_get_main_queue(), ^{ [importer hide]; });
+    }
+    return 1;
+}
+
 #endif

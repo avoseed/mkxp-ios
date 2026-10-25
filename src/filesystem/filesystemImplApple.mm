@@ -138,6 +138,15 @@ static NSString *portDocumentsPath() {
 }
 
 #if TARGET_OS_IPHONE
+/* Where "PC에서 받기" (TouchControls.mm) puts the files it fetches. */
+extern "C" const char *mkxp_ios_gameImportDir(void) {
+    static std::string dir;
+    @autoreleasepool {
+        dir = NSTOPATH([portDocumentsPath() stringByAppendingPathComponent:@"game"]);
+    }
+    return dir.c_str();
+}
+
 /* On iOS the app bundle is read-only and code-signed. The game ships as a blue
  * folder reference at <App>.app/game; on first launch (or after an app update)
  * we copy it into Documents/game so the game directory is writable and the
