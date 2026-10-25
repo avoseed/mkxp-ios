@@ -32,6 +32,7 @@
 		2F622174267CD9405ECB4064 /* graphics.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 3B10ED7B2568E95D00372D13 /* graphics.cpp */; };
 		319D403193F13F7989325EEA /* bicubic.frag in CopyFiles */ = {isa = PBXBuildFile; fileRef = CBEA4C45BE737EE0FF5A8A4C /* bicubic.frag */; };
 		335989E8E5B3C2A9EC38FEDC /* game in Resources */ = {isa = PBXBuildFile; fileRef = 31C7B6280ADE739077B92B14 /* game */; };
+		A1C0FFEE0000000000000A01 /* Assets-iOS.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1C0FFEE0000000000000A02 /* Assets-iOS.xcassets */; };
 		3389416F9825F408A40824F3 /* libbrotlicommon-static.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A8AA4AE49BB66C97EFAE3055 /* libbrotlicommon-static.a */; };
 		33AF24C9E788D8E073930420 /* filesystem.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 3B10ED542568E95D00372D13 /* filesystem.cpp */; };
 		381AD5422A82C033B6920D2E /* tileatlas.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 3B10ED912568E95E00372D13 /* tileatlas.cpp */; };
@@ -1033,6 +1034,7 @@
 		2EEE5344E383F2F7B84C544C /* libvorbisenc.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; name = libvorbisenc.a; path = "Dependencies/build-iphoneos-arm64/lib/libvorbisenc.a"; sourceTree = "<group>"; };
 		2F1C4A1E3048A0B4C8E6A79B /* TouchControls.mm */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.objcpp; name = TouchControls.mm; path = views/TouchControls.mm; sourceTree = "<group>"; };
 		31C7B6280ADE739077B92B14 /* game */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder; name = game; path = ../../game; sourceTree = "<group>"; };
+		A1C0FFEE0000000000000A02 /* Assets-iOS.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Assets-iOS.xcassets"; sourceTree = "<group>"; };
 		3B012198261544A0001E574A /* string-util.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "string-util.h"; sourceTree = "<group>"; };
 		3B10EC832568E78400372D13 /* icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = icon.png; path = ../assets/icon.png; sourceTree = "<group>"; };
 		3B10EC842568E78400372D13 /* liberation.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = liberation.ttf; path = ../assets/liberation.ttf; sourceTree = "<group>"; };
@@ -2253,6 +2255,7 @@
 			children = (
 				DF9D739A364BF41433033690 /* 3.1.0 */,
 				31C7B6280ADE739077B92B14 /* game */,
+				A1C0FFEE0000000000000A02 /* Assets-iOS.xcassets */,
 			);
 			name = "iOS Resources";
 			sourceTree = "<group>";
@@ -2542,6 +2545,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				335989E8E5B3C2A9EC38FEDC /* game in Resources */,
+				A1C0FFEE0000000000000A01 /* Assets-iOS.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
