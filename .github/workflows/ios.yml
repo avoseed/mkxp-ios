@@ -54,9 +54,9 @@ jobs:
 
       - name: Version
         run: |
-          # VERSION holds the app version; the build number is the CI run number,
+          # APP_VERSION holds the app version; the build number is the CI run number,
           # so every IPA is uniquely "AnotherRed-<version>-b<build>".
-          echo "APP_VERSION=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$(tr -d '[:space:]' < APP_VERSION)" >> "$GITHUB_ENV"
           echo "APP_BUILD=${{ github.run_number }}" >> "$GITHUB_ENV"
 
       - name: Build app
