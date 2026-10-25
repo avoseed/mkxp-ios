@@ -276,7 +276,7 @@ int main(int argc, char *argv[]) {
 #endif
 
 #if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
-    /* The IPA ships without game data: offer "PC에서 받기" (Wi-Fi from the PC),
+    /* The IPA ships without game data: offer "PC에서 받기" (Wi-Fi from the PC, found automatically),
      * then look for the game again; explain where it goes if it's still missing. */
     if (!mkxp_fs::fileExists("Game.ini") && mkxp_ios_importGame())
         mkxp_fs::setCurrentDirectory(mkxp_fs::getDefaultGameRoot().c_str());

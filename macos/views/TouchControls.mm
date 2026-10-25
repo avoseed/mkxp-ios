@@ -25,6 +25,9 @@
 #include "eventthread.h"
 
 #include <atomic>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 
 static void pressKey(int sc, bool down) {
     EventThread::keyStates[sc] = down;
@@ -752,13 +755,12 @@ static NSString *const kImportAddressKey = @"wifiImportAddress";
     label.textColor = UIColor.whiteColor;
     label.font = [UIFont systemFontOfSize:15];
     label.text = [NSString stringWithFormat:
-        @"게임 파일이 없습니다.\nPC에서 serve-games를 켜고 아래에 PC 주소를 넣어 받거나,\n"
-        @"'파일' 앱의 %@ › game 폴더에 PC판 게임 폴더를 복사한 뒤 다시 실행하세요.", _app];
+        @"게임 파일이 없습니다.\nPC에서 'PC에서-받기-서버'를 켠 뒤 아래 버튼을 누르세요. PC는 자동으로 찾습니다.\n"
+        @"또는 '파일' 앱의 %@ › game 폴더에 PC판 게임 폴더를 복사한 뒤 다시 실행하세요.", _app];
 
     _field = [[UITextField alloc] init];
-    _field.placeholder = @"PC 주소 (예: 192.168.0.10:8765)";
-    /* The PC running serve-games (E:\ios-ports\PC에서-받기-서버.cmd) until the player changes it. */
-    _field.text = [NSUserDefaults.standardUserDefaults stringForKey:kImportAddressKey] ?: @"192.168.0.2:8765";
+    _field.placeholder = @"PC 주소 (비워 두면 자동으로 찾음)";
+    _field.text = [NSUserDefaults.standardUserDefaults stringForKey:kImportAddressKey];
     _field.borderStyle = UITextBorderStyleRoundedRect;
     _field.keyboardType = UIKeyboardTypeURL;
     _field.autocapitalizationType = UITextAutocapitalizationTypeNone;
@@ -813,23 +815,110 @@ static NSString *const kImportAddressKey = @"wifiImportAddress";
     dispatch_async(dispatch_get_main_queue(), ^{ self->_status.text = text; });
 }
 
-- (void)start {
-    NSString *text = [_field.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    [NSUserDefaults.standardUserDefaults setObject:text forKey:kImportAddressKey];
-    if (![text containsString:@"://"])
-        text = [@"http://" stringByAppendingString:text];
-    NSURL *base = [NSURL URLWithString:text];
-    if (!base.host) {
-        _status.text = @"PC 주소가 올바르지 않습니다. 예: 192.168.0.10:8765";
-        return;
+/* ---- Finding the PC: no address needed ---- */
+
+static NSData *fetchData(NSURLSession *s, NSURL *url, NSInteger *status, NSError **err);
+
+static NSURL *addressURL(NSString *address) {
+    NSString *text = [address containsString:@"://"] ? address : [@"http://" stringByAppendingString:address];
+    NSURL *url = [NSURL URLWithString:text];
+    return url.host ? url : nil;
+}
+
+/* serve-games answers "/" with {"apps": [...]}; true if it offers `app`. */
+static BOOL probeAddress(NSURLSession *s, NSString *address, NSString *app) {
+    NSURL *url = addressURL(address);
+    if (!url) return NO;
+    NSInteger code = 0;
+    NSData *data = fetchData(s, url, &code, NULL);
+    if (code != 200 || !data) return NO;
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    return [json isKindOfClass:NSDictionary.class] && [json[@"apps"] containsObject:app];
+}
+
+/* "a.b.c.d:port" for every other host on the Wi-Fi (en*) IPv4 subnet, limited
+ * to the phone's /24 when the subnet is larger than a /22. */
+static NSArray<NSString *> *subnetHosts(int port) {
+    NSMutableArray *hosts = [NSMutableArray array];
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list) != 0) return hosts;
+    for (struct ifaddrs *ifa = list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || !ifa->ifa_netmask || ifa->ifa_addr->sa_family != AF_INET ||
+            strncmp(ifa->ifa_name, "en", 2) != 0)
+            continue;
+        uint32_t ip = ntohl(((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr);
+        uint32_t mask = ntohl(((struct sockaddr_in *)ifa->ifa_netmask)->sin_addr.s_addr);
+        if (__builtin_popcount(mask) < 22) mask = 0xFFFFFF00;
+        if (~mask < 2) continue;
+        uint32_t net = ip & mask;
+        for (uint32_t i = 1; i < ~mask; i++) {
+            uint32_t h = net | i;
+            if (h != ip)
+                [hosts addObject:[NSString stringWithFormat:@"%u.%u.%u.%u:%d",
+                                  h >> 24, (h >> 16) & 255, (h >> 8) & 255, h & 255, port]];
+        }
     }
+    freeifaddrs(list);
+    return hosts;
+}
+
+/* Blocking: the given addresses, the PC this was set up with (LAN, Tailscale),
+ * then every host on the subnet, 64 at a time. Nil if no PC answers. */
+- (NSString *)discoverPreferring:(NSArray<NSString *> *)preferred {
+    NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    config.timeoutIntervalForRequest = 1.5;
+    config.connectionProxyDictionary = @{};   // the PC is on the LAN: never via a VPN/proxy app
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSMutableOrderedSet<NSString *> *first = [NSMutableOrderedSet orderedSet];
+    for (NSString *a in [preferred arrayByAddingObjectsFromArray:@[@"192.168.0.2:8765", @"100.99.113.123:8765"]])
+        if (a.length) [first addObject:a];
+    for (NSString *a in first)
+        if (probeAddress(session, a, _app)) return a;
+
+    NSArray<NSString *> *hosts = subnetHosts(8765);
+    __block NSString *found = nil;
+    NSObject *lock = [[NSObject alloc] init];
+    for (NSUInteger start = 0; start < hosts.count && !found; start += 64) {
+        dispatch_group_t group = dispatch_group_create();
+        for (NSUInteger i = start; i < MIN(start + 64, hosts.count); i++) {
+            NSString *host = hosts[i];
+            dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                @synchronized (lock) { if (found) return; }
+                if (probeAddress(session, host, self->_app))
+                    @synchronized (lock) { if (!found) found = host; }
+            });
+        }
+        dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+    }
+    [session finishTasksAndInvalidate];
+    return found;
+}
+
+- (void)start {
+    NSString *typed = [_field.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:kImportAddressKey] ?: @"";
     [_field resignFirstResponder];
     _button.enabled = NO;
     _bar.hidden = NO;
-    _status.text = @"PC에 연결하는 중…";
+    _status.text = @"같은 와이파이에서 PC를 찾는 중…";
     UIApplication.sharedApplication.idleTimerDisabled = YES;   // don't sleep mid-transfer
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *error = [self runFrom:base];
+        NSString *address = [self discoverPreferring:@[typed, saved]];
+        NSString *error = nil;
+        if (!address) {
+            error = @"PC를 찾지 못했습니다. '로컬 네트워크' 허용 창이 떴다면 허용한 뒤 다시 누르세요.\n"
+                    @"그래도 안 되면 확인해 주세요:\n"
+                    @"① PC에서 'PC에서-받기-서버.cmd'가 켜져 있나요?\n"
+                    @"② 휴대폰이 PC와 같은 와이파이에 있나요? (셀룰러·VPN 끄기)\n"
+                    @"③ 설정 › 개인정보 보호 및 보안 › 로컬 네트워크에서 LiveContainer(또는 이 앱)가 켜져 있나요?";
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self->_field.text = address;
+                self->_status.text = [address stringByAppendingString:@"에 연결했습니다."];
+            });
+            [NSUserDefaults.standardUserDefaults setObject:address forKey:kImportAddressKey];
+            error = [self runFrom:addressURL(address)];
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             UIApplication.sharedApplication.idleTimerDisabled = NO;
             if (error) {
@@ -865,6 +954,7 @@ static NSData *fetchData(NSURLSession *s, NSURL *url, NSInteger *status, NSError
     NSURLSessionConfiguration *config = NSURLSessionConfiguration.defaultSessionConfiguration;
     config.timeoutIntervalForRequest = 30;
     config.HTTPMaximumConnectionsPerHost = 4;
+    config.connectionProxyDictionary = @{};
     NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
     NSFileManager *fm = NSFileManager.defaultManager;
 
