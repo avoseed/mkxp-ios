@@ -394,7 +394,9 @@ static void crashSignal(int sig) {
     head[i] = 0;
     void *frames[64];
     int count = backtrace(frames, 64);
-    int fd = open(g_crashPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    /* Append: an uncaught exception has just written its name and reason here
+     * (crashException) and the abort() that follows lands in this handler. */
+    int fd = open(g_crashPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) {
         writeAll(fd, head);
         backtrace_symbols_fd(frames, count, fd);
@@ -854,6 +856,13 @@ extern "C" void mkxp_ios_syncSavesAtStart(const char *saveDir) {
 
 - (void)startEditing { [self setEditing:YES]; }
 
+/* The overlay is about to be hidden (a pad connected): leave the editor and the
+ * settings, or the game would stay paused under a panel nobody can reach. */
+- (void)closeMenus {
+    if (_editing) [self stopEditing];
+    [self hideSettings];
+}
+
 - (void)stopEditing {
     [self setEditing:NO];
     [self save];
@@ -1302,6 +1311,8 @@ static BOOL g_touchControlsHidden = NO;
 extern "C" void mkxp_ios_setTouchControlsHidden(int hidden) {
     dispatch_async(dispatch_get_main_queue(), ^{
         g_touchControlsHidden = hidden ? YES : NO;
+        if (g_touchControlsHidden)
+            [g_overlay closeMenus];
         g_overlay.hidden = g_touchControlsHidden;
     });
 }

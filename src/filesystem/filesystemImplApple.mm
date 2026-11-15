@@ -140,20 +140,24 @@ static NSString *portDocumentsPath() {
 #if TARGET_OS_IPHONE
 /* The data root itself: the app's log, crash record and the save sync's state
  * live here (TouchControls.mm, port_save_sync.m). */
+/* Both are made once (the path doesn't change), so a pointer handed to one thread
+ * isn't freed by another thread's call. */
 extern "C" const char *mkxp_ios_dataRoot(void) {
-    static std::string dir;
-    @autoreleasepool {
-        dir = NSTOPATH(portDocumentsPath());
-    }
+    static const std::string dir = [] {
+        @autoreleasepool {
+            return std::string(NSTOPATH(portDocumentsPath()));
+        }
+    }();
     return dir.c_str();
 }
 
 /* Where "PC에서 받기" (TouchControls.mm) puts the files it fetches. */
 extern "C" const char *mkxp_ios_gameImportDir(void) {
-    static std::string dir;
-    @autoreleasepool {
-        dir = NSTOPATH([portDocumentsPath() stringByAppendingPathComponent:@"game"]);
-    }
+    static const std::string dir = [] {
+        @autoreleasepool {
+            return std::string(NSTOPATH([portDocumentsPath() stringByAppendingPathComponent:@"game"]));
+        }
+    }();
     return dir.c_str();
 }
 
