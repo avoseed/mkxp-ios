@@ -133,6 +133,16 @@ static NSString *portDocumentsPath() {
             [NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES
                                                      attributes:nil error:nil];
         }
+#if TARGET_OS_IPHONE
+        /* The game (hundreds of MB) comes back from the PC ("PC에서 받기"), so it
+         * stays out of the iCloud / computer backup; the saves (the sibling
+         * "Pokemon Another Red" folder) and the rest stay in it. */
+        NSString *game = [path stringByAppendingPathComponent:@"game"];
+        [NSFileManager.defaultManager createDirectoryAtPath:game withIntermediateDirectories:YES
+                                                 attributes:nil error:nil];
+        [[NSURL fileURLWithPath:game isDirectory:YES] setResourceValue:@YES
+                                                                forKey:NSURLIsExcludedFromBackupKey error:nil];
+#endif
     });
     return path;
 }

@@ -343,3 +343,12 @@ make everything -f ios-arm64.make          # deps-core + ruby (1·2단계)
   LiveContainer 안에서는 LiveContainer의 설정을 따른다.
 - 노치·다이내믹 아일랜드 기종: L/R·톱니가 둥근 모서리에 걸리지 않는지(가장자리 여백을 20pt로 묶어 둠).
 - 오래 하면 `mkxp.log`가 커지는지(실행마다 새로 시작, 한 번 전 것만 `mkxp-prev.log`로 남음).
+
+### 공통 수정 (2026-11-15, 다른 앱 점검에서 나온 것) — 기기 미확인
+- 게임 데이터 `game` 폴더는 기기 백업(iCloud·컴퓨터)에서 뺀다(`NSURLIsExcludedFromBackupKey`, PC에서 다시 받을 수 있음).
+  세이브(`Pokemon Another Red`)와 로그·설정은 백업에 남는다.
+- 안내 문구의 '파일' 앱 위치: 아이패드는 "나의 iPad", 아이폰은 "나의 iPhone".
+- 메모리 경고 때 `MEMORY warning: N MB still available` 줄을 `mkxp.log`에 남긴다(`os_proc_available_memory`).
+- 버튼이 화면 밖으로 나가지 않게: 아이패드처럼 그림 옆 띠가 좁으면 D패드·ABXY 열을 안쪽으로 옮기고,
+  모든 버튼(저장된 위치 포함)의 중심을 버튼 전체가 안전 영역 안에 들도록 제한한다.
+- 기기에서 볼 것: 아이패드에서 D패드 왼쪽 끝·A 오른쪽 끝이 잘리지 않는지, 예전에 끌어 둔 위치가 화면 가장자리면 안으로 들어오는지.

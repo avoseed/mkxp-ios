@@ -29,6 +29,7 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <os/proc.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -349,6 +350,11 @@ extern "C" int mkxp_ios_targetFrameRate(void) {
 
 static NSString *dataRoot(void) { return @(mkxp_ios_dataRoot()); }
 
+/* How the Files app names this device's "On My ..." location. */
+static NSString *filesDeviceName(void) {
+    return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? @"나의 iPad" : @"나의 iPhone";
+}
+
 static NSString *appVersion(void) {
     NSDictionary *info = NSBundle.mainBundle.infoDictionary;
     return [NSString stringWithFormat:@"v%@ (빌드 %@)", info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]];
@@ -540,6 +546,14 @@ extern "C" void mkxp_ios_startLog(void) {
         for (int sig : sigs)
             signal(sig, crashSignal);
         NSSetUncaughtExceptionHandler(crashException);
+
+        /* SDL owns the app delegate, so the memory warning comes as a notification:
+         * how close the app is to being killed, for the log / diagnostics. */
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification
+            object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+            portLog(@"MEMORY warning: %llu MB still available to the app",
+                    (unsigned long long)(os_proc_available_memory() >> 20));
+        }];
     }
 }
 
@@ -1173,13 +1187,14 @@ extern "C" void mkxp_ios_syncSavesAtStart(const char *saveDir) {
 
 - (void)helpTapped {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"도움말"
-        message:@"조작: A 결정 · B 취소 · X 메뉴 · Y 등록한 도구 · L/R · ▶▶ 누르는 동안 배속.\n"
+        message:[NSString stringWithFormat:
+                @"조작: A 결정 · B 취소 · X 메뉴 · Y 등록한 도구 · L/R · ▶▶ 누르는 동안 배속.\n"
                 @"블루투스 패드를 연결하면 화면 버튼이 숨겨집니다.\n\n"
-                @"세이브: '파일' 앱의 Another Red › Pokemon Another Red 폴더. PC판의 "
-                @"%APPDATA%\\Pokemon Another Red와 같은 파일이라 서로 복사해 이어 할 수 있습니다.\n\n"
+                @"세이브: '파일' 앱의 %@ › Another Red › Pokemon Another Red 폴더. PC판의 "
+                @"%%APPDATA%%\\Pokemon Another Red와 같은 파일이라 서로 복사해 이어 할 수 있습니다.\n\n"
                 @"세이브 공유: iCloud Drive 폴더를 고르거나 'PC와 공유'를 켜면 게임 시작 전과 앱을 나갈 때 "
                 @"다른 기기와 맞춥니다. PC는 'PC에서-받기-서버'가 켜져 있어야 합니다.\n\n"
-                @"설정이나 패드 배치가 열려 있는 동안과 앱을 잠시 나간 동안 게임이 멈춥니다."
+                @"설정이나 패드 배치가 열려 있는 동안과 앱을 잠시 나간 동안 게임이 멈춥니다.", filesDeviceName()]
         preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"확인" style:UIAlertActionStyleCancel handler:nil]];
     [[self presenter] presentViewController:a animated:YES completion:nil];
@@ -1236,6 +1251,16 @@ extern "C" void mkxp_ios_syncSavesAtStart(const char *saveDir) {
         c = CGPointMake([e[@"x"] doubleValue] * self.bounds.size.width,
                         [e[@"y"] doubleValue] * self.bounds.size.height);
     v.bounds = CGRectMake(0, 0, size.width * s, size.height * s);
+    /* The whole control stays on screen, inside the safe area (sides capped as
+     * in layoutSubviews), wherever its default or saved centre is. */
+    UIEdgeInsets safe = self.safeAreaInsets;
+    safe.left = MIN(safe.left, 20);
+    safe.right = MIN(safe.right, 20);
+    CGFloat hw = v.bounds.size.width / 2, hh = v.bounds.size.height / 2;
+    CGFloat minX = safe.left + hw, maxX = self.bounds.size.width - safe.right - hw;
+    CGFloat minY = safe.top + hh, maxY = self.bounds.size.height - safe.bottom - hh;
+    if (minX <= maxX) c.x = MIN(MAX(c.x, minX), maxX);
+    if (minY <= maxY) c.y = MIN(MAX(c.y, minY), maxY);
     v.center = c;
 }
 
@@ -1269,6 +1294,9 @@ extern "C" void mkxp_ios_syncSavesAtStart(const char *saveDir) {
     /* Never cover the game picture when the bars have room for a usable pad. */
     if (leftW >= 100)
         pad = MIN(pad, leftW - 8);
+    /* Narrow bars (iPad: 0-45pt): the column centre would put half the pad off
+     * screen, so move it in until the pad fits. */
+    lcx = MAX(lcx, safe.left + pad / 2 + 4);
     CGFloat pcy = bottomY - pad / 2;
     [self place:_dpad size:CGSizeMake(pad, pad) center:CGPointMake(lcx, pcy)];
 
@@ -1278,6 +1306,8 @@ extern "C" void mkxp_ios_syncSavesAtStart(const char *saveDir) {
     if (rightW >= 100)
         d = MIN(d, (rightW - 8) / 2.96);   // diamond is 2 * off + d wide
     CGFloat off = d * 0.98;
+    /* The same for the diamond (A is off + d/2 right of its centre). */
+    rcx = MIN(rcx, W - safe.right - off - d / 2 - 4);
     CGSize face = CGSizeMake(d, d);
     [self place:_a size:face center:CGPointMake(rcx + off, pcy)];
     [self place:_b size:face center:CGPointMake(rcx, pcy + off)];
@@ -1413,7 +1443,8 @@ static NSString *const kImportAddressKey = @"wifiImportAddress";
     else
         label.text = [NSString stringWithFormat:
             @"게임 파일이 없습니다.\nPC에서 'PC에서-받기-서버'를 켠 뒤 아래 버튼을 누르세요. PC는 자동으로 찾습니다.\n"
-            @"또는 '파일' 앱의 %@ › game 폴더에 PC판 게임 폴더를 복사한 뒤 다시 실행하세요.", _app];
+            @"또는 '파일' 앱의 %@ › %@ › game 폴더에 PC판 게임 폴더를 복사한 뒤 다시 실행하세요.",
+            filesDeviceName(), _app];
 
     _field = [[UITextField alloc] init];
     _field.placeholder = @"PC 주소 (비워 두면 자동으로 찾음)";
