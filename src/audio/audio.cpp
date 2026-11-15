@@ -35,6 +35,14 @@
 #include <SDL_thread.h>
 #include <SDL_timer.h>
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+/* audiosession-ios.mm: another app is playing while "다른 앱 소리와 함께" is on. */
+extern "C" int mkxp_ios_musicMuted(void);
+#endif
+
 struct AudioPrivate
 {
     
@@ -105,6 +113,9 @@ struct AudioPrivate
 	{
 		const float fadeOutStep = 1.f / (200  / AUDIO_SLEEP);
 		const float fadeInStep  = 1.f / (1000 / AUDIO_SLEEP);
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+		float bgmHostVolume = 1.0f;
+#endif
 
 		while (true)
 		{
@@ -112,6 +123,22 @@ struct AudioPrivate
 
 			if (meWatch.termReq)
 				return;
+
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+			/* While another app plays music (mixed in), only the BGM steps
+			 * aside; sound effects, BGS and ME stay. */
+			{
+				float host = mkxp_ios_musicMuted() ? 0.0f : 1.0f;
+				if (host != bgmHostVolume) {
+					bgmHostVolume = host;
+					for (auto track : bgmTracks) {
+						track->lockStream();
+						track->setVolume(AudioStream::Host, host);
+						track->unlockStream();
+					}
+				}
+			}
+#endif
 
 			switch (meWatch.state)
 			{

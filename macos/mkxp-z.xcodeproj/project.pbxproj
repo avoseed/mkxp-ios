@@ -558,6 +558,7 @@
 		511356FE30C8B745C770D7B3 /* libssl.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A847908C87C9EAAFC8D97B1F /* libssl.a */; };
 		54F729454EE174F6A8F2BE59 /* etc-binding.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 3B10EDE62568E96A00372D13 /* etc-binding.cpp */; };
 		56852F14EA9595598BD33A77 /* audiosession-ios.mm in Sources */ = {isa = PBXBuildFile; fileRef = C5989E902D7C4AF880E74D82 /* audiosession-ios.mm */; };
+		A7E3C1D25B9F4E60A1C2D3E4 /* port_save_sync.m in Sources */ = {isa = PBXBuildFile; fileRef = B8F4D2E36CA05F71B2D3E4F5 /* port_save_sync.m */; };
 		5830898EF9737CB1C03C8B65 /* filesystemImplApple.mm in Sources */ = {isa = PBXBuildFile; fileRef = 3B5A840C2569BE7C00BAF2E5 /* filesystemImplApple.mm */; };
 		588431857FE346FCB2C35C45 /* miniffi.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 3B312842259E7DC1002EAB43 /* miniffi.cpp */; };
 		5B81F2659DF7CC5120455C7A /* libbz2.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = B59944C7F0685A3131618962 /* libbz2.tbd */; };
@@ -1370,6 +1371,7 @@
 		F2E31F0B04C1E5DF068EB61E /* libvorbis.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; name = libvorbis.a; path = "Dependencies/build-iphoneos-arm64/lib/libvorbis.a"; sourceTree = "<group>"; };
 		F92730EF40ED7B6C372C12BE /* libSDL2_ttf.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; name = libSDL2_ttf.a; path = "Dependencies/build-iphoneos-arm64/lib/libSDL2_ttf.a"; sourceTree = "<group>"; };
 		FA45D55E8BD9F3FEA04D8300 /* TouchControls.mm */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.cpp.objcpp; name = TouchControls.mm; path = views/TouchControls.mm; sourceTree = "<group>"; };
+		B8F4D2E36CA05F71B2D3E4F5 /* port_save_sync.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = port_save_sync.m; path = views/port_save_sync.m; sourceTree = "<group>"; };
 		FC861FFC5724C2BFAD5B1EFC /* OpenGLES.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OpenGLES.framework; path = System/Library/Frameworks/OpenGLES.framework; sourceTree = SDKROOT; };
 		FE5204152A08E27D0070038A /* CoreHaptics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreHaptics.framework; path = System/Library/Frameworks/CoreHaptics.framework; sourceTree = SDKROOT; };
 		FE52041A2A08E58D0070038A /* lanczos3.frag */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.glsl; name = lanczos3.frag; path = ../shader/lanczos3.frag; sourceTree = "<group>"; };
@@ -2153,6 +2155,7 @@
 				2F1C4A1E3048A0B4C8E6A79B /* TouchControls.mm */,
 				C5989E902D7C4AF880E74D82 /* audiosession-ios.mm */,
 				FA45D55E8BD9F3FEA04D8300 /* TouchControls.mm */,
+				B8F4D2E36CA05F71B2D3E4F5 /* port_save_sync.m */,
 				0C0EAF2C532DCC2848996918 /* iOS Libraries */,
 				DB03EE0A6D8097D0BFD653B3 /* iOS Frameworks */,
 				B1F5DFEF471005DC36A29213 /* iOS Resources */,
@@ -2704,6 +2707,7 @@
 				13AE6E6FA38B1D8C393F2BF7 /* sharedstate.cpp in Sources */,
 				56852F14EA9595598BD33A77 /* audiosession-ios.mm in Sources */,
 				F395F21AC41E08CE9A599BD3 /* TouchControls.mm in Sources */,
+				A7E3C1D25B9F4E60A1C2D3E4 /* port_save_sync.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

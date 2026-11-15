@@ -279,3 +279,49 @@ make everything -f ios-arm64.make          # deps-core + ruby (1·2단계)
 - `getDefaultGameRoot`는 번들에 `game/Game.ini`가 있을 때만 복사하고, 버전 마커가 있는
   (번들에서 복사한) 폴더만 교체한다 → 사용자가 직접 넣은 게임 폴더는 앱 업데이트로 지워지지 않는다.
 - `Game.ini`가 없으면 시작 시 넣을 위치를 안내하는 메시지를 띄우고 종료한다.
+
+---
+
+## 7. 통합 편의 기능 (1.3.0, 2026-11-15) — ⚠️ 기기 미확인
+
+`E:\ios-ports\README.md` 4·9·10절의 공통 기능을 넣었다. **PC에서는 컴파일되지 않아 CI 빌드도, 기기 확인도
+아직 안 했다.** 처음 기기에서 돌릴 때 아래 "기기에서 볼 것"을 확인한다.
+
+### 넣은 것
+- **설정 창**(톱니): `<앱> v<버전> (빌드 N)` → 세이브 공유(공유 폴더 · PC와 공유 · 지금 맞추기) → 다른 앱 소리와 함께
+  → 화면(절전 모드 · 40fps, 패드 배치 툴바에서 옮김) → 패드 배치 · 크기 · 투명도 → PC로 진단 보내기 → 도움말 → 닫기.
+- **세이브 공유**: `macos/views/port_save_sync.m/.h`(wog3-ios `3022e5f` 판 그대로, 헤더에만 C++용 `extern "C"` 가드를 더함).
+  `port_sync_configure(@"AnotherRed", <데이터 루트>, @[ @"Pokemon Another Red" ], @[ log, txt, json, mkxp1 ])`.
+  경로는 데이터 루트 기준 `Pokemon Another Red/Game.rxdata` → PC판 `%APPDATA%\Pokemon Another Red`의 파일을
+  `E:\ios-ports\saves\AnotherRed\Pokemon Another Red\`에 넣으면 그대로 내려간다. `errorlog.txt`, 기기별 `mkxp.json`,
+  `keybindings.mkxp1`(iOS와 PC의 패드 배치가 다름)은 공유하지 않는다.
+  시작 전 맞추기는 `main()`에서 설정을 읽은 직후(`mkxp_ios_syncSavesAtStart`, 검은 창 + 충돌 시 묻기, PC는 한 곳만 1.5초),
+  앱이 백그라운드로 갈 때는 올리기만.
+- **게임 멈춤**: 설정 창·패드 배치·앱 비활성(`WillResignActive`~`DidBecomeActive`) 동안. Apple 빌드는 `eventFilter`가
+  설치되지 않아 지금까지 비활성·백그라운드에서도 게임이 돌고 있었다. `eventthread.cpp`의 `mkxp_ios_setGamePaused`가
+  엔진의 `SyncPoint::haltThreads`(RGSS 스레드는 `Graphics::update`에서 잠, 프레임 타이머는 깨어날 때 다시 시작)와
+  `alcDevicePauseSOFT`를 쓴다. `haltThreads`는 RGSS 스레드가 다음 프레임에 닿을 때까지 기다리므로 메인 스레드가 아닌
+  전용 직렬 큐에서 부른다(RGSS 스레드가 메시지 상자로 메인 스레드를 기다리는 중이어도 막히지 않게).
+- **소리**: `Playback` + "다른 앱 소리와 함께"(기본 켬, `MixWithOthers`). 다른 앱이 재생 중이면
+  (`secondaryAudioShouldBeSilencedHint`) BGM만 쉰다: `AudioStream::Host` 볼륨을 MeWatch 스레드가 0/1로 둔다.
+  효과음·BGS·ME는 그대로. 바꾸면 바로 적용. SDL 오디오는 초기화하지 않으므로 SDL이 범주를 바꾸지 않지만,
+  `alcOpenDevice` 뒤에 한 번 더 적용하고 범주·옵션을 로그에 남긴다. 통화 등 중단이 끝나면 세션을 다시 켠다.
+- **PC로 진단 보내기**: stdout/stderr를 `<데이터 루트>/mkxp.log`로(이전 실행은 `mkxp-prev.log`). 시그널·ObjC 예외는
+  `crash-pending.txt` → 다음 실행에서 `crash-last.txt`(직전 로그 끝 포함)로 바꾸고 PC가 보이면 `crash.txt`로 자동 전송
+  (못 보내면 `crash-unsent` 표시로 다음에 다시). 설정 버튼은 `diag.txt`(버전·기기, 크래시 기록, Essentials `errorlog.txt`,
+  `mkxp.log` 끝 1MB)를 `POST /api/diag/AnotherRed/<이름>`으로 보낸다. 주소 순서는 받기와 같다.
+- **업데이트 받기**(README 9절): 게임이 이미 있으면 시작할 때 마지막 PC 주소(없으면 `192.168.0.2:8765`)에만 1.5초 목록을
+  묻고, 새 파일·크기가 바뀐 파일이 있으면 "받을까요?". 받기는 기존 `MKXPImporter`가 그 PC로 바로 이어 받는다.
+  받다 끊긴 업데이트는 다음 시작 때 받기 화면이 다시 뜨고, 거기 "건너뛰고 게임 시작"이 표시 파일을 지우고 게임을 띄운다.
+
+### 건너뛴 것
+- **아이패드 버튼 위치**(여백 40pt 이상이면 여백 안으로): 4:3 게임이라 아이패드에서 양옆 여백이 0~약 41pt(11" Pro)뿐이고
+  위아래 여백은 없다. 116pt 이상인 D패드·버튼이 들어갈 폭이 아니어서 해당 없음. 폰 가로 화면에서는 이미 여백 안에 둔다.
+- 배속(게임에 배속 버튼이 이미 있음), 게임 스레드 QoS(이 앱 지시에는 없음), 패드 숨김 토글(패드 연결 시 자동으로 숨김).
+
+### 기기에서 볼 것
+- 설정을 열면 음악·화면이 멈추고, 닫으면 튀지 않고 이어지는지. 제어 센터를 내렸다 올렸을 때도.
+- 메시지 상자(게임의 알림 창)가 떠 있는 동안 앱을 나갔다 와도 멈추지 않는지.
+- 음악 앱을 틀고 게임을 켰을 때 게임 BGM만 꺼지고 효과음은 나는지. 설정을 끄면 바로 음악 앱이 멈추는지. 로그의 `audio (...)` 줄.
+- 공유 폴더 고르기, PC와 공유, 시작 전 충돌 질문, 백그라운드 올리기. PC 세이브를 `saves\AnotherRed\Pokemon Another Red`에 넣고 내려오는지.
+- `mkxp.log`에 Ruby·엔진 출력이 남는지(LiveContainer 안에서도), 진단이 `logs\diag\AnotherRed`에 도착하는지.

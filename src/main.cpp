@@ -88,6 +88,10 @@ extern "C" void mkxp_ios_initAudioSession(void);
 extern "C" void mkxp_ios_initTouchControls(SDL_Window *win);
 extern "C" int mkxp_ios_importGame(void);
 extern "C" int mkxp_ios_importIncomplete(void);
+extern "C" void mkxp_ios_applyAudioMix(const char *when);
+extern "C" void mkxp_ios_startLog(void);
+extern "C" void mkxp_ios_offerUpdate(void);
+extern "C" void mkxp_ios_syncSavesAtStart(const char *saveDir);
 #endif
 
 #ifndef MKXPZ_INIT_GL_LATER
@@ -241,6 +245,10 @@ static void setupWindowIcon(const Config &conf, SDL_Window *win) {
 }
 
 int main(int argc, char *argv[]) {
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+    /* The app's log (stderr) and crash record, for "PC로 진단 보내기". */
+    mkxp_ios_startLog();
+#endif
     SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
 
@@ -281,6 +289,10 @@ int main(int argc, char *argv[]) {
      * then look for the game again; explain where it goes if it's still missing. */
     if ((!mkxp_fs::fileExists("Game.ini") || mkxp_ios_importIncomplete()) && mkxp_ios_importGame())
         mkxp_fs::setCurrentDirectory(mkxp_fs::getDefaultGameRoot().c_str());
+    else if (mkxp_fs::fileExists("Game.ini"))
+        /* Game already here: a quick look (1.5 s, one address) for new or changed
+         * files on the PC, e.g. a patch added there later (README section 9). */
+        mkxp_ios_offerUpdate();
     if (!mkxp_fs::fileExists("Game.ini")) {
       showInitError("게임 파일이 없습니다.\n\n"
                     "'파일' 앱 > 나의 iPhone > Another Red > game 폴더에 "
@@ -298,6 +310,12 @@ int main(int argc, char *argv[]) {
     /* now we load the config */
     Config conf;
     conf.read(argc, argv);
+
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+    /* Saves shared with the player's other devices (a Files folder and / or the
+     * PC), brought in step before the game reads them (README section 4). */
+    mkxp_ios_syncSavesAtStart(conf.customDataPath.c_str());
+#endif
 
 #if defined(__WIN32__)
     // Create a debug console in debug mode
@@ -461,6 +479,11 @@ int main(int argc, char *argv[]) {
 #endif
 
     ALCdevice *alcDev = alcOpenDevice(0);
+
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+    /* In case opening the device changed the session; logs the category. */
+    mkxp_ios_applyAudioMix("device opened");
+#endif
 
     if (!alcDev) {
       showInitError("Could not detect an available audio device.");

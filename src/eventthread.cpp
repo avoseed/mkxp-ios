@@ -89,6 +89,66 @@ initALCFunctions(ALCdevice *alcDev)
 
 #define HAVE_ALC_DEVICE_PAUSE alc.DevicePause
 
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+#include <atomic>
+#include <dispatch/dispatch.h>
+
+/* iOS: the port's settings panel, the pad layout editor, its alerts and the app
+ * being inactive pause the game (E:\ios-ports\README.md section 10). eventFilter
+ * isn't installed on Apple builds, so the halt the engine does on Android when
+ * going to the background is done here: the RGSS thread sleeps in
+ * Graphics::update (checkSyncLock; the frame timer starts over on wakeup), the
+ * audio threads in passSecondarySync and the OpenAL device is paused.
+ * haltThreads waits for the RGSS thread to reach its next frame, which may need
+ * the UIKit main thread (a message box), so it runs on its own serial queue,
+ * never on the main thread. reason: a bit per cause (TouchControls.mm). */
+static std::atomic<RGSSThreadData *> iosRtData{nullptr};
+static std::atomic<int> iosPauseReasons{0};
+static dispatch_queue_t iosPauseQueue;
+static bool iosPaused = false;   // only touched on iosPauseQueue
+
+static void iosApplyPause(void *)
+{
+    RGSSThreadData *rt = iosRtData.load();
+    if (!rt)
+        return;
+    bool want = iosPauseReasons.load() != 0;
+    if (want == iosPaused)
+        return;
+    iosPaused = want;
+    if (want) {
+        if (HAVE_ALC_DEVICE_PAUSE)
+            alc.DevicePause(rt->alcDev);
+        rt->syncPoint.haltThreads();
+    } else {
+        rt->syncPoint.resumeThreads();
+        if (HAVE_ALC_DEVICE_PAUSE)
+            alc.DeviceResume(rt->alcDev);
+    }
+}
+
+static void iosCreatePauseQueue(void *)
+{
+    iosPauseQueue = dispatch_queue_create("mkxp.ios.pause", DISPATCH_QUEUE_SERIAL);
+}
+
+static void iosQueuePause()
+{
+    static dispatch_once_t once;
+    dispatch_once_f(&once, 0, iosCreatePauseQueue);
+    dispatch_async_f(iosPauseQueue, 0, iosApplyPause);
+}
+
+extern "C" void mkxp_ios_setGamePaused(int reason, int on)
+{
+    if (on)
+        iosPauseReasons.fetch_or(reason);
+    else
+        iosPauseReasons.fetch_and(~reason);
+    iosQueuePause();
+}
+#endif
+
 uint8_t EventThread::keyStates[];
 uint8_t EventThread::keyStatesLatch[];
 EventThread::ControllerState EventThread::controllerState;
@@ -164,7 +224,13 @@ void EventThread::process(RGSSThreadData &rtData)
     UnidirMessage<Vec2i> &drawableSizeMsg = rtData.drawableSizeMsg;
     
     initALCFunctions(rtData.alcDev);
-    
+
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+    /* A pause asked for before now (app already inactive) takes effect here. */
+    iosRtData.store(&rtData);
+    iosQueuePause();
+#endif
+
     // XXX this function breaks input focus on OSX
 #ifndef __APPLE__
     SDL_SetEventFilter(eventFilter, &rtData);
@@ -630,6 +696,10 @@ void EventThread::process(RGSSThreadData &rtData)
             break;
     }
     
+#if defined(MKXPZ_BUILD_XCODE) && TARGET_OS_IPHONE
+    iosRtData.store(nullptr);   // no more pauses once the game is stopping
+#endif
+
     /* Just in case */
     rtData.syncPoint.resumeThreads();
     

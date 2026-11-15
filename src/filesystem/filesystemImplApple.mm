@@ -138,6 +138,16 @@ static NSString *portDocumentsPath() {
 }
 
 #if TARGET_OS_IPHONE
+/* The data root itself: the app's log, crash record and the save sync's state
+ * live here (TouchControls.mm, port_save_sync.m). */
+extern "C" const char *mkxp_ios_dataRoot(void) {
+    static std::string dir;
+    @autoreleasepool {
+        dir = NSTOPATH(portDocumentsPath());
+    }
+    return dir.c_str();
+}
+
 /* Where "PC에서 받기" (TouchControls.mm) puts the files it fetches. */
 extern "C" const char *mkxp_ios_gameImportDir(void) {
     static std::string dir;

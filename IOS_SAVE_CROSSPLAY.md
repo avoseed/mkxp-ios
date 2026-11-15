@@ -49,3 +49,10 @@
 - 세이브 폴더는 게임 에셋(`Documents/game/`)과 **분리** 권장(섞이지 않게).
 - `.rxdata`는 바이너리라 OS 간 줄바꿈/인코딩 문제 없음.
 - iOS 세이브 경로 변경 후 첫 실행이면 기존(있다면) 세이브가 새 위치엔 없으므로, 필요 시 3번 마이그레이션.
+
+## 기기간 자동 공유 (1.3.0, 2026-11-15, 기기 미확인)
+
+위의 손 복사 외에, 설정의 "세이브 공유"로 다른 기기·PC와 자동으로 맞춘다(`E:\ios-ports\README.md` 4절).
+공유하는 경로는 데이터 루트 기준 `Pokemon Another Red/…`이므로, PC판 `%APPDATA%\Pokemon Another Red`의 세이브를
+`E:\ios-ports\saves\AnotherRed\Pokemon Another Red\`에 넣으면 'PC와 공유'를 켠 기기로 내려간다.
+`errorlog.txt`, `mkxp.json`, `keybindings.mkxp1`은 기기마다 따로 둔다. 자세한 내용은 `IOS_PORTING.md` 7절.

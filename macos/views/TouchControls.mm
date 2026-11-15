@@ -26,8 +26,24 @@
 
 #include <atomic>
 #include <arpa/inet.h>
+#include <execinfo.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <unistd.h>
+
+#import "port_save_sync.h"   // C linkage (port_save_sync.m is Objective-C)
+
+extern "C" void mkxp_ios_setGamePaused(int reason, int on);   // eventthread.cpp
+extern "C" int mkxp_ios_mixOtherAudio(void);                   // audiosession-ios.mm
+extern "C" void mkxp_ios_setMixOtherAudio(int on);
+extern "C" const char *mkxp_ios_dataRoot(void);                // filesystemImplApple.mm
+extern "C" const char *mkxp_ios_gameImportDir(void);
+
+/* Why the game is paused (mkxp_ios_setGamePaused): README section 10. */
+enum { kPauseInactive = 1, kPauseSettings = 2, kPauseEditor = 4 };
 
 static void pressKey(int sc, bool down) {
     EventThread::keyStates[sc] = down;
@@ -47,7 +63,8 @@ static UIColor *padBlack()  { return rgb(38, 38, 42); }
 
 /* Overlay that only intercepts touches that land on a control; everything else
  * falls through to SDL's GL view underneath. */
-@interface MKXPTouchOverlay : UIView
+@interface MKXPTouchOverlay : UIView <UIDocumentPickerDelegate>
+- (void)showToast:(NSString *)text;
 @end
 
 /* ------------------------------------------------------------------------- */
@@ -322,6 +339,333 @@ extern "C" int mkxp_ios_targetFrameRate(void) {
     return fps;
 }
 
+/* ------------------------------------------------------------------------- */
+/* The app's log and crash record, for "PC로 진단 보내기" (README section 10).
+ * stdout and stderr (the engine's Debug(), Ruby's output and errors, the port's
+ * own lines) go to <data root>/mkxp.log; the previous run's log is kept as
+ * mkxp-prev.log. A crash (signal or Objective-C exception) is written to
+ * crash-pending.txt; the next launch turns it into crash-last.txt (with the
+ * end of the log before it) and sends it to the PC if one answers. */
+
+static NSString *dataRoot(void) { return @(mkxp_ios_dataRoot()); }
+
+static NSString *appVersion(void) {
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    return [NSString stringWithFormat:@"v%@ (빌드 %@)", info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]];
+}
+
+static void portLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+static void portLog(NSString *format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    NSString *line = [[NSString alloc] initWithFormat:format arguments:ap];
+    va_end(ap);
+    fprintf(stderr, "mkxp-z: %s\n", line.UTF8String);
+}
+
+/* The last `limit` bytes of a text file, or nil. */
+static NSString *fileTail(NSString *path, NSUInteger limit) {
+    NSData *d = [NSData dataWithContentsOfFile:path];
+    if (!d.length) return nil;
+    if (d.length > limit) d = [d subdataWithRange:NSMakeRange(d.length - limit, limit)];
+    return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
+        ?: [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
+}
+
+static char g_crashPath[1024];
+
+static void writeAll(int fd, const char *s) {
+    size_t n = strlen(s);
+    while (n > 0) {
+        ssize_t w = write(fd, s, n);
+        if (w <= 0) return;
+        s += w;
+        n -= (size_t)w;
+    }
+}
+
+/* Async-signal-safe enough: open/write/backtrace_symbols_fd, no allocation. */
+static void crashSignal(int sig) {
+    char head[32] = "signal ";
+    int i = 7;
+    if (sig >= 10) head[i++] = '0' + (sig / 10) % 10;
+    head[i++] = '0' + sig % 10;
+    head[i++] = '\n';
+    head[i] = 0;
+    void *frames[64];
+    int count = backtrace(frames, 64);
+    int fd = open(g_crashPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        writeAll(fd, head);
+        backtrace_symbols_fd(frames, count, fd);
+        close(fd);
+    }
+    writeAll(2, "mkxp-z: crash, ");
+    writeAll(2, head);
+    backtrace_symbols_fd(frames, count, 2);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void crashException(NSException *e) {
+    NSString *t = [NSString stringWithFormat:@"exception %@: %@\n%@\n", e.name, e.reason,
+                   [e.callStackSymbols componentsJoinedByString:@"\n"]];
+    [t writeToFile:@(g_crashPath) atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    fprintf(stderr, "mkxp-z: crash, %s", t.UTF8String);
+}
+
+/* Set when the game's config is read (mkxp_ios_syncSavesAtStart): the save
+ * folder, where Essentials also writes errorlog.txt. */
+static NSString *g_saveDir;
+
+/* Version, device, the crash record (given, or the last one), Essentials'
+ * errorlog.txt and the end of this run's log. */
+static NSString *diagText(NSString *crash) {
+    NSString *root = dataRoot();
+    UIDevice *dev = UIDevice.currentDevice;
+    NSMutableString *t = [NSMutableString stringWithFormat:@"AnotherRed %@, %@ iOS %@\n", appVersion(), dev.model,
+                          dev.systemVersion];
+    NSString *last = crash ?: [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"crash-last.txt"]
+                                                       encoding:NSUTF8StringEncoding error:nil];
+    if (last.length) [t appendFormat:@"\n==== crash record\n%@\n", last];
+    if (g_saveDir) {
+        NSString *err = fileTail([g_saveDir stringByAppendingPathComponent:@"errorlog.txt"], 256 * 1024);
+        if (err.length) [t appendFormat:@"\n==== errorlog.txt (game script errors)\n%@\n", err];
+    }
+    if (!crash) {
+        NSString *log = fileTail([root stringByAppendingPathComponent:@"mkxp.log"], 1u << 20);
+        if (log.length) [t appendFormat:@"\n==== mkxp.log\n%@", log];
+    }
+    return t;
+}
+
+/* The order "PC에서 받기" tries first: the last address that worked, then the usual ones. */
+static NSArray<NSString *> *diagHosts(void) {
+    NSMutableArray<NSString *> *hosts = [NSMutableArray array];
+    NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:@"wifiImportAddress"];
+    for (NSString *a in @[ saved ?: @"", @"192.168.0.2:8765", @"100.99.113.123:8765" ]) {
+        NSString *h = [a stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([h hasPrefix:@"http://"]) h = [h substringFromIndex:7];
+        while ([h hasSuffix:@"/"]) h = [h substringToIndex:h.length - 1];
+        if (h.length && ![h containsString:@":"]) h = [h stringByAppendingString:@":8765"];
+        if (h.length && ![hosts containsObject:h]) [hosts addObject:h];
+    }
+    return hosts;
+}
+
+/* POST /api/diag/AnotherRed/<name> (the server keeps it in logs\diag\AnotherRed).
+ * Blocking, off the main thread; returns the host that took it, or nil. */
+static NSString *diagPost(NSString *text, NSString *name, double timeout) {
+    NSData *body = [text dataUsingEncoding:NSUTF8StringEncoding];
+    NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    config.connectionProxyDictionary = @{};   // the PC is on the LAN: never through a VPN / proxy app
+    config.timeoutIntervalForRequest = timeout;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSString *took = nil;
+    for (NSString *host in diagHosts()) {
+        NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://%@/api/diag/AnotherRed/%@", host, name]];
+        if (!url) continue;
+        NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:url];
+        rq.HTTPMethod = @"POST";
+        [rq setValue:@"text/plain; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
+        __block NSInteger code = 0;
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        [[session uploadTaskWithRequest:rq fromData:body completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            code = e ? 0 : [(NSHTTPURLResponse *)r statusCode];
+            dispatch_semaphore_signal(done);
+        }] resume];
+        dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+        if (code == 200) { took = host; break; }
+    }
+    [session finishTasksAndInvalidate];
+    return took;
+}
+
+/* Called first thing in main(). */
+extern "C" void mkxp_ios_startLog(void) {
+    @autoreleasepool {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *root = dataRoot();
+        NSString *log = [root stringByAppendingPathComponent:@"mkxp.log"];
+        NSString *prev = [root stringByAppendingPathComponent:@"mkxp-prev.log"];
+        [fm removeItemAtPath:prev error:nil];
+        [fm moveItemAtPath:log toPath:prev error:nil];
+        int fd = open(log.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            dup2(fd, 1);
+            dup2(fd, 2);
+            close(fd);
+            setvbuf(stdout, NULL, _IOLBF, 0);
+            setvbuf(stderr, NULL, _IONBF, 0);
+        }
+        UIDevice *dev = UIDevice.currentDevice;
+        portLog(@"Another Red %@, %@ iOS %@", appVersion(), dev.model, dev.systemVersion);
+
+        /* The last run crashed: keep the record with the log before it, and send it. */
+        NSString *pending = [root stringByAppendingPathComponent:@"crash-pending.txt"];
+        NSString *lastPath = [root stringByAppendingPathComponent:@"crash-last.txt"];
+        NSString *unsent = [root stringByAppendingPathComponent:@"crash-unsent"];
+        NSString *crash = [NSString stringWithContentsOfFile:pending encoding:NSUTF8StringEncoding error:nil];
+        if (crash.length) {
+            NSString *before = fileTail(prev, 256 * 1024) ?: @"";
+            NSString *record = [NSString stringWithFormat:@"%@\n==== the log before the crash (mkxp-prev.log)\n%@",
+                                crash, before];
+            [record writeToFile:lastPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [fm createFileAtPath:unsent contents:nil attributes:nil];
+            portLog(@"the last run crashed; record kept in crash-last.txt");
+        }
+        [fm removeItemAtPath:pending error:nil];
+        if ([fm fileExistsAtPath:unsent]) {
+            NSString *record = [NSString stringWithContentsOfFile:lastPath encoding:NSUTF8StringEncoding error:nil];
+            if (record.length) {
+                NSString *text = diagText(record);
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    NSString *host = diagPost(text, @"crash.txt", 1.5);
+                    if (host) {
+                        [NSFileManager.defaultManager removeItemAtPath:unsent error:nil];
+                        portLog(@"crash record sent to %@", host);
+                    } else {
+                        portLog(@"crash record not sent (no PC); tried again next launch");
+                    }
+                });
+            } else {
+                [fm removeItemAtPath:unsent error:nil];
+            }
+        }
+
+        snprintf(g_crashPath, sizeof g_crashPath, "%s", pending.fileSystemRepresentation);
+        static const int sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP };
+        for (int sig : sigs)
+            signal(sig, crashSignal);
+        NSSetUncaughtExceptionHandler(crashException);
+    }
+}
+
+/* A black window over everything, for what has to happen before the game
+ * starts (main() calls these before the SDL window exists, on the UIKit main
+ * thread or not). present gets its view controller and calls finish when done. */
+typedef void (^PortFinish)(void);
+static void runBlockingWindow(NSString *message, void (^present)(UIViewController *vc, PortFinish finish)) {
+    __block BOOL finished = NO;
+    __block UIWindow *window = nil;
+    void (^show)(void) = ^{
+        UIViewController *vc = [[UIViewController alloc] init];
+        vc.view.backgroundColor = UIColor.blackColor;
+        UILabel *label = [[UILabel alloc] init];
+        label.text = message;
+        label.numberOfLines = 0;
+        label.textAlignment = NSTextAlignmentCenter;
+        label.textColor = [UIColor colorWithWhite:1 alpha:0.8];
+        label.font = [UIFont systemFontOfSize:15];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        [vc.view addSubview:label];
+        [NSLayoutConstraint activateConstraints:@[
+            [label.centerXAnchor constraintEqualToAnchor:vc.view.centerXAnchor],
+            [label.centerYAnchor constraintEqualToAnchor:vc.view.centerYAnchor],
+            [label.widthAnchor constraintLessThanOrEqualToAnchor:vc.view.widthAnchor constant:-48],
+        ]];
+        window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        window.rootViewController = vc;
+        [window makeKeyAndVisible];
+        present(vc, ^{ finished = YES; });
+    };
+    void (^hide)(void) = ^{
+        window.hidden = YES;
+        window = nil;
+    };
+    if (NSThread.isMainThread) {
+        show();
+        while (!finished)
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+        hide();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), show);
+        while (!finished)
+            usleep(50 * 1000);
+        dispatch_sync(dispatch_get_main_queue(), hide);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Saves shared between devices (README section 4, port_save_sync.m): a folder
+ * picked in the Files app and / or the PC. The paths are the save folder's from
+ * the data root ("Pokemon Another Red/Game.rxdata"), the same folder name as
+ * the PC game's %APPDATA%\Pokemon Another Red, so a PC save put in
+ * E:\ios-ports\saves\AnotherRed\Pokemon Another Red comes down as it is. */
+
+static NSString *g_pendingToast;   // shown once the pad overlay is up
+
+static void askSyncConflict(UIViewController *vc, void (^answer)(int resolve)) {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"세이브가 양쪽에서 바뀌었습니다"
+        message:@"이 기기와 다른 기기(공유 폴더·PC)에서 같은 세이브가 각각 바뀌었습니다. 어느 쪽을 쓸까요?\n"
+                @"(바뀌는 쪽의 이전 세이브는 이 기기의 save-backup, PC의 .history에 남습니다.)"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"이 기기 세이브" style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *x) { answer(1); }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"다른 기기 세이브" style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *x) { answer(-1); }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"나중에" style:UIAlertActionStyleCancel
+                                        handler:^(UIAlertAction *x) { answer(0); }]];
+    [vc presentViewController:a animated:YES completion:nil];
+}
+
+static void syncAtStartStep(UIViewController *vc, int resolve, PortFinish finish) {
+    port_sync_run_start(resolve, ^(NSString *summary, BOOL conflict, BOOL changed) {
+        portLog(@"save sync (start): %@", summary);
+        if ([summary containsString:@"PC 세이브는 확인 못 함"])
+            g_pendingToast = @"PC 세이브는 확인 못 함";
+        if (!conflict) { finish(); return; }
+        askSyncConflict(vc, ^(int r) {
+            if (r) syncAtStartStep(vc, r, finish);
+            else finish();
+        });
+    });
+}
+
+/* main(), once the config (and so the save folder) is known, before the game
+ * starts. Also: leaving the app sends new saves up (nothing is written here
+ * then; the game is paused while the app is inactive). */
+extern "C" void mkxp_ios_syncSavesAtStart(const char *saveDir) {
+    @autoreleasepool {
+        NSString *root = dataRoot();
+        g_saveDir = @(saveDir);
+        NSString *rel = g_saveDir.lastPathComponent;
+        if ([g_saveDir hasPrefix:[root stringByAppendingString:@"/"]])
+            rel = [g_saveDir substringFromIndex:root.length + 1];
+        /* Not shared: Essentials' errorlog.txt, mkxp's per-device mkxp.json and
+         * keybindings.mkxp1 (pad bindings differ between iOS and the PC). */
+        port_sync_configure(@"AnotherRed", root, @[ rel ], @[ @"log", @"txt", @"json", @"mkxp1" ]);
+        portLog(@"save folder: %@ (shared as %@)", g_saveDir, rel);
+
+        static BOOL observing;
+        if (!observing) {
+            observing = YES;
+            [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification
+                object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+                if (!port_sync_configured()) return;
+                UIApplication *app = UIApplication.sharedApplication;
+                __block UIBackgroundTaskIdentifier task = [app beginBackgroundTaskWithExpirationHandler:^{
+                    [app endBackgroundTask:task];
+                    task = UIBackgroundTaskInvalid;
+                }];
+                port_sync_run(0, YES, ^(NSString *summary, BOOL conflict, BOOL changed) {
+                    portLog(@"save sync (background): %@", summary);
+                    if (task != UIBackgroundTaskInvalid) {
+                        [app endBackgroundTask:task];
+                        task = UIBackgroundTaskInvalid;
+                    }
+                });
+            }];
+        }
+
+        if (!port_sync_configured())
+            return;
+        runBlockingWindow(@"세이브를 다른 기기와 맞추는 중…", ^(UIViewController *vc, PortFinish finish) {
+            syncAtStartStep(vc, 0, finish);
+        });
+    }
+}
+
 @implementation MKXPTouchOverlay {
     MKXPDPad *_dpad;
     MKXPPadButton *_a, *_b, *_x, *_y, *_l, *_r, *_speed;
@@ -336,8 +680,14 @@ extern "C" int mkxp_ios_targetFrameRate(void) {
     CGFloat _pinchStart;
     UIView *_toolbar;
     UISlider *_alphaSlider;
-    UISwitch *_powerSave;
     UILabel *_hint;
+
+    /* Settings panel (the gear), README section 10 order. */
+    UIView *_settings;
+    UIButton *_syncFolderButton;
+    UISwitch *_syncPCSwitch;
+    UILabel *_syncStatus;
+    UIButton *_diagButton;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -395,7 +745,7 @@ extern "C" int mkxp_ios_targetFrameRate(void) {
     _gear = [UIButton buttonWithType:UIButtonTypeSystem];
     [_gear setImage:[UIImage systemImageNamed:@"gearshape.fill"] forState:UIControlStateNormal];
     _gear.tintColor = rgb(150, 150, 160);
-    [_gear addTarget:self action:@selector(startEditing) forControlEvents:UIControlEventTouchUpInside];
+    [_gear addTarget:self action:@selector(showSettings) forControlEvents:UIControlEventTouchUpInside];
     [self addSubview:_gear];
 
     [self buildToolbar];
@@ -431,21 +781,13 @@ extern "C" int mkxp_ios_targetFrameRate(void) {
     [_alphaSlider addTarget:self action:@selector(alphaChanged:) forControlEvents:UIControlEventValueChanged];
     [_alphaSlider.widthAnchor constraintEqualToConstant:110].active = YES;
 
-    UILabel *powerLabel = [[UILabel alloc] init];
-    powerLabel.text = @"절전 모드 (40fps)";
-    powerLabel.textColor = UIColor.whiteColor;
-    powerLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
-    _powerSave = [[UISwitch alloc] init];
-    _powerSave.on = mkxp_ios_targetFrameRate() == 40;
-    [_powerSave addTarget:self action:@selector(powerSaveChanged:) forControlEvents:UIControlEventValueChanged];
-
+    /* (절전 모드 moved to the settings panel, 화면.) */
     UIStackView *top = [[UIStackView alloc] initWithArrangedSubviews:@[
         [self toolButton:@"크기 −" action:@selector(shrink)],
         [self toolButton:@"크기 +" action:@selector(grow)],
         alphaLabel, _alphaSlider,
     ]];
     UIStackView *bottom = [[UIStackView alloc] initWithArrangedSubviews:@[
-        powerLabel, _powerSave,
         [self toolButton:@"초기화" action:@selector(resetLayout)],
         [self toolButton:@"완료" action:@selector(stopEditing)],
     ]];
@@ -493,6 +835,8 @@ extern "C" int mkxp_ios_targetFrameRate(void) {
 
 - (void)setEditing:(BOOL)editing {
     _editing = editing;
+    /* The game waits while the pad is being laid out. */
+    mkxp_ios_setGamePaused(kPauseEditor, editing ? 1 : 0);
     for (UIView *v in _controls.allValues) {
         [(id)v setEditing:editing];
         if (editing) [(id)v releaseAll];
@@ -576,6 +920,278 @@ extern "C" int mkxp_ios_targetFrameRate(void) {
 - (void)powerSaveChanged:(UISwitch *)s {
     [NSUserDefaults.standardUserDefaults setBool:s.on forKey:kPowerSaveKey];
     g_targetFps.store(s.on ? 40 : 60);
+}
+
+/* ---- Settings panel: title, 세이브 공유, 다른 앱 소리와 함께, 화면, 패드,
+ * PC로 진단 보내기, 도움말, 닫기 (README section 10). The game is paused
+ * while it is open. ---- */
+
+- (UIViewController *)presenter {
+    UIViewController *vc = self.window.rootViewController;
+    while (vc.presentedViewController)
+        vc = vc.presentedViewController;
+    return vc;
+}
+
+- (UILabel *)panelLabel:(NSString *)text size:(CGFloat)size color:(UIColor *)color {
+    UILabel *l = [[UILabel alloc] init];
+    l.text = text;
+    l.numberOfLines = 0;
+    l.textColor = color;
+    l.font = [UIFont systemFontOfSize:size weight:UIFontWeightSemibold];
+    return l;
+}
+
+- (UIButton *)panelButton:(NSString *)title action:(SEL)action {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    [b setTitle:title forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    b.titleLabel.numberOfLines = 0;
+    b.tintColor = UIColor.whiteColor;
+    b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
+    b.layer.cornerRadius = 9;
+    b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    b.contentEdgeInsets = UIEdgeInsetsMake(9, 14, 9, 14);
+    [b.heightAnchor constraintGreaterThanOrEqualToConstant:42].active = YES;
+    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
+- (UIView *)panelSwitch:(NSString *)title on:(BOOL)on action:(SEL)action made:(UISwitch **)made {
+    UISwitch *sw = [[UISwitch alloc] init];
+    sw.on = on;
+    [sw addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+    UILabel *l = [self panelLabel:title size:16 color:UIColor.whiteColor];
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[ l, sw ]];
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 10;
+    row.layoutMargins = UIEdgeInsetsMake(4, 14, 4, 8);
+    row.layoutMarginsRelativeArrangement = YES;
+    if (made) *made = sw;
+    return row;
+}
+
+- (NSString *)syncFolderTitle {
+    NSString *name = port_sync_folder_name();
+    return [NSString stringWithFormat:@"공유 폴더 · %@", name ?: @"없음"];
+}
+
+- (void)showSettings {
+    if (_settings) return;
+    for (UIView *v in _controls.allValues)
+        [(id)v releaseAll];
+    mkxp_ios_setGamePaused(kPauseSettings, 1);
+
+    UIView *panel = [[UIView alloc] initWithFrame:self.bounds];
+    panel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    panel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+
+    UIView *card = [[UIView alloc] init];
+    card.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.97];
+    card.layer.cornerRadius = 14;
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    [panel addSubview:card];
+
+    UIScrollView *scroll = [[UIScrollView alloc] init];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    [card addSubview:scroll];
+
+    UIColor *dim = [UIColor colorWithWhite:1 alpha:0.6];
+    NSMutableArray<UIView *> *rows = [NSMutableArray array];
+    NSString *name = NSBundle.mainBundle.infoDictionary[@"CFBundleDisplayName"] ?: @"Another Red";
+    [rows addObject:[self panelLabel:[NSString stringWithFormat:@"%@ %@", name, appVersion()] size:18
+                               color:UIColor.whiteColor]];
+
+    [rows addObject:[self panelLabel:@"세이브 공유" size:13 color:dim]];
+    _syncFolderButton = [self panelButton:[self syncFolderTitle] action:@selector(syncFolderTapped)];
+    [rows addObject:_syncFolderButton];
+    UISwitch *pc = nil;
+    [rows addObject:[self panelSwitch:@"PC와 공유" on:port_sync_pc() action:@selector(syncPCChanged:) made:&pc]];
+    _syncPCSwitch = pc;
+    [rows addObject:[self panelButton:@"지금 맞추기" action:@selector(syncNowTapped)]];
+    _syncStatus = [self panelLabel:@"게임 시작 전과 앱을 나갈 때 맞춥니다." size:12 color:dim];
+    [rows addObject:_syncStatus];
+
+    [rows addObject:[self panelLabel:@"소리" size:13 color:dim]];
+    [rows addObject:[self panelSwitch:@"다른 앱 소리와 함께" on:mkxp_ios_mixOtherAudio() != 0
+                               action:@selector(mixChanged:) made:nil]];
+
+    [rows addObject:[self panelLabel:@"화면" size:13 color:dim]];
+    [rows addObject:[self panelSwitch:@"절전 모드 · 40fps" on:mkxp_ios_targetFrameRate() == 40
+                               action:@selector(powerSaveChanged:) made:nil]];
+
+    [rows addObject:[self panelLabel:@"패드" size:13 color:dim]];
+    [rows addObject:[self panelButton:@"패드 배치 · 크기 · 투명도" action:@selector(editLayoutTapped)]];
+
+    [rows addObject:[self panelLabel:@"" size:6 color:dim]];
+    _diagButton = [self panelButton:@"PC로 진단 보내기" action:@selector(diagTapped)];
+    [rows addObject:_diagButton];
+    [rows addObject:[self panelButton:@"도움말" action:@selector(helpTapped)]];
+    UIButton *close = [self panelButton:@"닫기" action:@selector(hideSettings)];
+    close.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    [rows addObject:close];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:rows];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 8;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [scroll addSubview:stack];
+
+    NSLayoutConstraint *wantW = [card.widthAnchor constraintEqualToConstant:440];
+    wantW.priority = UILayoutPriorityDefaultHigh;
+    NSLayoutConstraint *wantH = [card.heightAnchor constraintEqualToAnchor:stack.heightAnchor constant:32];
+    wantH.priority = UILayoutPriorityDefaultHigh;
+    UILayoutGuide *safe = panel.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [card.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [card.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
+        [card.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-24],
+        [card.heightAnchor constraintLessThanOrEqualToAnchor:safe.heightAnchor constant:-16],
+        wantW, wantH,
+        [scroll.topAnchor constraintEqualToAnchor:card.topAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:16],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-16],
+        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:16],
+        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-16],
+        [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-32],
+    ]];
+
+    _settings = panel;
+    [self addSubview:panel];
+}
+
+- (void)hideSettings {
+    if (!_settings) return;
+    [_settings removeFromSuperview];
+    _settings = nil;
+    _syncFolderButton = nil;
+    _syncPCSwitch = nil;
+    _syncStatus = nil;
+    _diagButton = nil;
+    mkxp_ios_setGamePaused(kPauseSettings, 0);
+}
+
+- (void)editLayoutTapped {
+    [self setEditing:YES];   // pauses for the editor before the panel lets go
+    [self hideSettings];
+}
+
+- (void)mixChanged:(UISwitch *)s {
+    mkxp_ios_setMixOtherAudio(s.on ? 1 : 0);
+}
+
+/* While the game is paused: a save that comes down replaces the file; the game
+ * shows it the next time its load screen reads the save. */
+- (void)syncNow:(int)resolve {
+    if (!port_sync_configured()) {
+        _syncStatus.text = @"공유 폴더를 고르거나 'PC와 공유'를 켜세요.";
+        return;
+    }
+    _syncStatus.text = @"세이브 맞추는 중…";
+    port_sync_run(resolve, NO, ^(NSString *summary, BOOL conflict, BOOL changed) {
+        portLog(@"save sync: %@", summary);
+        self->_syncStatus.text = summary;
+        if (conflict)
+            askSyncConflict([self presenter], ^(int r) { if (r) [self syncNow:r]; });
+    });
+}
+
+- (void)syncNowTapped { [self syncNow:0]; }
+
+- (void)syncPCChanged:(UISwitch *)s {
+    port_sync_set_pc(s.on);
+    if (s.on) [self syncNow:0];
+}
+
+- (void)syncFolderTapped {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"세이브 공유 폴더"
+        message:@"'파일' 앱의 iCloud Drive 폴더를 하나 고르면, 같은 폴더를 고른 다른 기기와 세이브를 맞춥니다."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"폴더 고르기" style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction *x) { [self pickSyncFolder]; }]];
+    if (port_sync_folder_name())
+        [a addAction:[UIAlertAction actionWithTitle:@"공유 끄기" style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *x) {
+            port_sync_set_folder(nil);
+            [self->_syncFolderButton setTitle:[self syncFolderTitle] forState:UIControlStateNormal];
+        }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"취소" style:UIAlertActionStyleCancel handler:nil]];
+    [[self presenter] presentViewController:a animated:YES completion:nil];
+}
+
+- (void)pickSyncFolder {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    /* (initForOpeningContentTypes: needs UniformTypeIdentifiers; this works on iOS 14 too.) */
+    UIDocumentPickerViewController *p = [[UIDocumentPickerViewController alloc]
+        initWithDocumentTypes:@[ @"public.folder" ] inMode:UIDocumentPickerModeOpen];
+#pragma clang diagnostic pop
+    p.delegate = self;
+    [[self presenter] presentViewController:p animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)c didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSURL *url = urls.firstObject;
+    if (!url) return;
+    if (!port_sync_set_folder(url)) {
+        _syncStatus.text = @"그 폴더는 쓸 수 없습니다.";
+        return;
+    }
+    [_syncFolderButton setTitle:[self syncFolderTitle] forState:UIControlStateNormal];
+    [self syncNow:0];
+}
+
+- (void)diagTapped {
+    _diagButton.enabled = NO;
+    [_diagButton setTitle:@"PC로 진단 보내기 · 보내는 중…" forState:UIControlStateNormal];
+    UIButton *button = _diagButton;
+    NSString *text = diagText(nil);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *host = diagPost(text, @"diag.txt", 4);
+        portLog(@"diagnostics %@", host ? [@"sent to " stringByAppendingString:host] : @"not sent (no PC)");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            button.enabled = YES;
+            [button setTitle:host ? [@"PC로 진단 보내기 · 보냄 " stringByAppendingString:host]
+                                  : @"PC로 진단 보내기 · PC를 못 찾음 (받기 서버 켜기)"
+                    forState:UIControlStateNormal];
+        });
+    });
+}
+
+- (void)helpTapped {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"도움말"
+        message:@"조작: A 결정 · B 취소 · X 메뉴 · Y 등록한 도구 · L/R · ▶▶ 누르는 동안 배속.\n"
+                @"블루투스 패드를 연결하면 화면 버튼이 숨겨집니다.\n\n"
+                @"세이브: '파일' 앱의 Another Red › Pokemon Another Red 폴더. PC판의 "
+                @"%APPDATA%\\Pokemon Another Red와 같은 파일이라 서로 복사해 이어 할 수 있습니다.\n\n"
+                @"세이브 공유: iCloud Drive 폴더를 고르거나 'PC와 공유'를 켜면 게임 시작 전과 앱을 나갈 때 "
+                @"다른 기기와 맞춥니다. PC는 'PC에서-받기-서버'가 켜져 있어야 합니다.\n\n"
+                @"설정이나 패드 배치가 열려 있는 동안과 앱을 잠시 나간 동안 게임이 멈춥니다."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"확인" style:UIAlertActionStyleCancel handler:nil]];
+    [[self presenter] presentViewController:a animated:YES completion:nil];
+}
+
+/* A short note at the bottom of the screen that fades by itself. */
+- (void)showToast:(NSString *)text {
+    UILabel *l = [[UILabel alloc] init];
+    l.text = [NSString stringWithFormat:@"  %@  ", text];
+    l.font = [UIFont boldSystemFontOfSize:14];
+    l.textColor = UIColor.whiteColor;
+    l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.65];
+    l.layer.cornerRadius = 8;
+    l.clipsToBounds = YES;
+    [l sizeToFit];
+    l.bounds = CGRectMake(0, 0, l.bounds.size.width, l.bounds.size.height + 12);
+    l.center = CGPointMake(self.bounds.size.width / 2, self.bounds.size.height - 40);
+    l.userInteractionEnabled = NO;
+    [self addSubview:l];
+    [UIView animateWithDuration:0.4 delay:2.5 options:0 animations:^{ l.alpha = 0; }
+                     completion:^(BOOL f) { [l removeFromSuperview]; }];
 }
 
 - (void)alphaChanged:(UISlider *)s {
@@ -710,6 +1326,27 @@ extern "C" void mkxp_ios_initTouchControls(SDL_Window *win) {
             g_overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
             g_overlay.hidden = g_touchControlsHidden;
             [root addSubview:g_overlay];
+
+            /* The game waits while the app is inactive (Control Center, a call,
+             * the app switcher) and in the background. */
+            NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+            [nc addObserverForName:UIApplicationWillResignActiveNotification object:nil
+                             queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+                mkxp_ios_setGamePaused(kPauseInactive, 1);
+            }];
+            [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+                             queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+                mkxp_ios_setGamePaused(kPauseInactive, 0);
+            }];
+            /* (No pause from the state at this point: under LiveContainer the
+             * first DidBecomeActive may already have gone by.) */
+
+            if (g_pendingToast) {
+                NSString *text = g_pendingToast;
+                g_pendingToast = nil;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{ [g_overlay showToast:text]; });
+            }
         }
     });
 }
@@ -727,6 +1364,8 @@ static NSString *const kImportAddressKey = @"wifiImportAddress";
 
 @interface MKXPImporter : NSObject <UITextFieldDelegate>
 @property (nonatomic, copy) void (^finished)(BOOL ok);
+/* Update: start right away from this PC (no search). */
+@property (nonatomic, copy) NSString *autoAddress;
 - (void)show;
 - (void)hide;
 @end
@@ -737,6 +1376,8 @@ static NSString *const kImportAddressKey = @"wifiImportAddress";
     UIButton *_button;
     UIProgressView *_bar;
     UILabel *_status;
+    UIButton *_skip;
+    BOOL _busy;   // a transfer is running
     NSString *_app;
     NSString *_dest;
 }
@@ -754,9 +1395,14 @@ static NSString *const kImportAddressKey = @"wifiImportAddress";
     label.textAlignment = NSTextAlignmentCenter;
     label.textColor = UIColor.whiteColor;
     label.font = [UIFont systemFontOfSize:15];
-    label.text = [NSString stringWithFormat:
-        @"게임 파일이 없습니다.\nPC에서 'PC에서-받기-서버'를 켠 뒤 아래 버튼을 누르세요. PC는 자동으로 찾습니다.\n"
-        @"또는 '파일' 앱의 %@ › game 폴더에 PC판 게임 폴더를 복사한 뒤 다시 실행하세요.", _app];
+    /* A game already here: an update that is starting or was cut short. */
+    BOOL haveGame = [NSFileManager.defaultManager fileExistsAtPath:[_dest stringByAppendingPathComponent:@"Game.ini"]];
+    if (haveGame)
+        label.text = @"PC에서 새 게임 파일을 받습니다. 끊기면 다시 누르면 이어서 받습니다.";
+    else
+        label.text = [NSString stringWithFormat:
+            @"게임 파일이 없습니다.\nPC에서 'PC에서-받기-서버'를 켠 뒤 아래 버튼을 누르세요. PC는 자동으로 찾습니다.\n"
+            @"또는 '파일' 앱의 %@ › game 폴더에 PC판 게임 폴더를 복사한 뒤 다시 실행하세요.", _app];
 
     _field = [[UITextField alloc] init];
     _field.placeholder = @"PC 주소 (비워 두면 자동으로 찾음)";
@@ -784,7 +1430,15 @@ static NSString *const kImportAddressKey = @"wifiImportAddress";
     _status.font = [UIFont systemFontOfSize:13];
     _status.text = [NSString stringWithFormat:@"v%@ (%@)", info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"]];
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[label, _field, _button, _bar, _status]];
+    NSMutableArray<UIView *> *items = [@[label, _field, _button, _bar, _status] mutableCopy];
+    if (haveGame) {
+        _skip = [UIButton buttonWithType:UIButtonTypeSystem];
+        [_skip setTitle:@"건너뛰고 게임 시작" forState:UIControlStateNormal];
+        _skip.titleLabel.font = [UIFont systemFontOfSize:15];
+        [_skip addTarget:self action:@selector(skipUpdate) forControlEvents:UIControlEventTouchUpInside];
+        [items insertObject:_skip atIndex:3];
+    }
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:items];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.alignment = UIStackViewAlignmentCenter;
     stack.spacing = 12;
@@ -799,6 +1453,18 @@ static NSString *const kImportAddressKey = @"wifiImportAddress";
     _window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     _window.rootViewController = vc;
     [_window makeKeyAndVisible];
+    if (self.autoAddress)
+        [self start];
+}
+
+/* README section 9: the update's marker goes, the game as it is starts. Files
+ * already replaced stay (each is whole: written to a temp file, then moved). */
+- (void)skipUpdate {
+    if (_busy) return;
+    [NSFileManager.defaultManager removeItemAtPath:[_dest stringByAppendingPathComponent:@".pcimport-incomplete"]
+                                             error:nil];
+    portLog(@"update skipped");
+    if (self.finished) self.finished(NO);
 }
 
 - (void)hide {
@@ -895,15 +1561,20 @@ static NSArray<NSString *> *subnetHosts(int port) {
 }
 
 - (void)start {
+    if (_busy) return;
     NSString *typed = [_field.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
     NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:kImportAddressKey] ?: @"";
+    NSString *direct = self.autoAddress;   // an update: the PC that just answered
+    self.autoAddress = nil;
+    _busy = YES;
+    _skip.enabled = NO;
     [_field resignFirstResponder];
     _button.enabled = NO;
     _bar.hidden = NO;
     _status.text = @"같은 와이파이에서 PC를 찾는 중…";
     UIApplication.sharedApplication.idleTimerDisabled = YES;   // don't sleep mid-transfer
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *address = [self discoverPreferring:@[typed, saved]];
+        NSString *address = direct ?: [self discoverPreferring:@[typed, saved]];
         NSString *error = nil;
         if (!address) {
             error = @"PC를 찾지 못했습니다. '로컬 네트워크' 허용 창이 떴다면 허용한 뒤 다시 누르세요.\n"
@@ -921,6 +1592,8 @@ static NSArray<NSString *> *subnetHosts(int port) {
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             UIApplication.sharedApplication.idleTimerDisabled = NO;
+            self->_busy = NO;
+            self->_skip.enabled = YES;
             if (error) {
                 self->_status.text = [error stringByAppendingString:@"\n다시 누르면 이어서 받습니다."];
                 self->_button.enabled = YES;
@@ -1056,12 +1729,13 @@ extern "C" int mkxp_ios_importIncomplete(void) {
 
 /* Blocks until the player has fetched the game (returns 1). main() calls this
  * before the SDL window exists; it may run on the UIKit main thread or not. */
-extern "C" int mkxp_ios_importGame(void) {
+static int runImporter(NSString *autoAddress) {
     __block BOOL finished = NO;
     __block MKXPImporter *importer = nil;
     void (^present)(void) = ^{
         importer = [[MKXPImporter alloc] init];
         importer.finished = ^(BOOL ok) { finished = YES; };
+        importer.autoAddress = autoAddress;
         [importer show];
     };
     if (NSThread.isMainThread) {
@@ -1076,6 +1750,87 @@ extern "C" int mkxp_ios_importGame(void) {
         dispatch_sync(dispatch_get_main_queue(), ^{ [importer hide]; });
     }
     return 1;
+}
+
+/* Blocks until the player has fetched the game (returns 1). main() calls this
+ * before the SDL window exists; it may run on the UIKit main thread or not. */
+extern "C" int mkxp_ios_importGame(void) {
+    return runImporter(nil);
+}
+
+/* "업데이트 받기" (README section 9): with the game already here, ask only the
+ * last PC that answered (or the usual address) for its list, for at most 1.5 s.
+ * New files or files of another size there (a patch added on the PC later) are
+ * offered; "받기" fetches just those (the importer skips files of the same size
+ * and keeps the marker until all are in), "건너뛰고 게임 시작" starts the game
+ * as it is. */
+extern "C" void mkxp_ios_offerUpdate(void) {
+    @autoreleasepool {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *dest = @(mkxp_ios_gameImportDir());
+        /* Only a game laid out as the PC sends it (not one unzipped a folder deeper). */
+        if (![fm fileExistsAtPath:[dest stringByAppendingPathComponent:@"Game.ini"]])
+            return;
+        NSString *app = NSBundle.mainBundle.infoDictionary[@"PortDataFolder"] ?: @"Game";
+        NSString *address = [NSUserDefaults.standardUserDefaults stringForKey:kImportAddressKey];
+        if (!address.length)
+            address = @"192.168.0.2:8765";
+        NSURL *base = addressURL(address);
+        if (!base)
+            return;
+
+        NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+        config.timeoutIntervalForRequest = 1.5;
+        config.connectionProxyDictionary = @{};
+        NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+        NSInteger code = 0;
+        NSData *data = fetchData(session, [[base URLByAppendingPathComponent:@"api/manifest"]
+                                              URLByAppendingPathComponent:app], &code, NULL);
+        [session finishTasksAndInvalidate];
+        id manifest = (code == 200 && data) ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if (![manifest isKindOfClass:NSDictionary.class]) {
+            portLog(@"update check: no PC at %@", address);
+            return;
+        }
+        id files = manifest[@"files"];
+        if (![files isKindOfClass:NSArray.class])
+            return;
+        NSUInteger count = 0;
+        long long bytes = 0;
+        for (NSDictionary *f in files) {
+            if (![f isKindOfClass:NSDictionary.class] || ![f[@"p"] isKindOfClass:NSString.class])
+                continue;
+            long long want = [f[@"s"] longLongValue];
+            NSNumber *size = [fm attributesOfItemAtPath:[dest stringByAppendingPathComponent:f[@"p"]] error:nil][NSFileSize];
+            if (!size || size.longLongValue != want) {
+                count++;
+                bytes += want;
+            }
+        }
+        if (!count) {
+            portLog(@"update check: up to date (%@)", address);
+            return;
+        }
+        portLog(@"update check: %lu new or changed files on %@", (unsigned long)count, address);
+
+        __block BOOL fetch = NO;
+        runBlockingWindow(@"", ^(UIViewController *vc, PortFinish finish) {
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"PC에 새 게임 파일이 있습니다"
+                message:[NSString stringWithFormat:@"새 파일이나 바뀐 파일 %lu개 (%.1f MB). 지금 받을까요?",
+                                                   (unsigned long)count, bytes / 1e6]
+                preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"받기" style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *x) { fetch = YES; finish(); }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"건너뛰고 게임 시작" style:UIAlertActionStyleCancel
+                                                handler:^(UIAlertAction *x) { finish(); }]];
+            /* Once the window is on screen. */
+            dispatch_async(dispatch_get_main_queue(), ^{ [vc presentViewController:a animated:YES completion:nil]; });
+        });
+        if (fetch)
+            runImporter(address);
+        else
+            portLog(@"update declined");
+    }
 }
 
 #endif
